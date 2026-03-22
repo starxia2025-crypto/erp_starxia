@@ -1,0 +1,177 @@
+{
+  "project_name": "CRM_ERP_System",
+  "design_philosophy": {
+    "name": "Tactical Obsidian",
+    "description": "A high-contrast, performance-oriented design mixing deep charcoal backgrounds with electric orange accents. Focus on data density, legibility, and modern minimalism.",
+    "emotional_tone": "Efficient, Modern, Industrial, Premium",
+    "archetype": "The Performance Pro (Archetype 2) + Swiss High-Contrast",
+    "theme_strategy": "Dark Mode First (with high-contrast Light Mode option)"
+  },
+  "typography": {
+    "font_family_imports": [
+      "@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');"
+    ],
+    "headings": {
+      "family": "\"Manrope\", sans-serif",
+      "weights": ["600", "700", "800"],
+      "usage": "Page titles, card headers, key metrics",
+      "letter_spacing": "-0.02em"
+    },
+    "body": {
+      "family": "\"Inter\", sans-serif",
+      "weights": ["400", "500"],
+      "usage": "General text, table data, inputs"
+    },
+    "mono": {
+      "family": "\"JetBrains Mono\", monospace",
+      "weights": ["400", "500"],
+      "usage": "IDs, SKU codes, financial figures, API keys"
+    }
+  },
+  "colors": {
+    "palette": {
+      "primary": {
+        "hex": "#FF5500",
+        "name": "Electric Orange",
+        "usage": "CTAs, active states, key data points"
+      },
+      "secondary": {
+        "hex": "#FFFFFF",
+        "name": "Pure White",
+        "usage": "High contrast text, icons on dark"
+      },
+      "background": {
+        "dark": "#09090b",
+        "light": "#f4f4f5"
+      },
+      "surface": {
+        "dark": "#18181b",
+        "light": "#ffffff"
+      },
+      "border": {
+        "dark": "#27272a",
+        "light": "#e4e4e7"
+      },
+      "success": "#10b981",
+      "warning": "#f59e0b",
+      "error": "#ef4444",
+      "info": "#3b82f6"
+    },
+    "css_variables": {
+      "root": {
+        "--background": "0 0% 98%",
+        "--foreground": "240 10% 3.9%",
+        "--card": "0 0% 100%",
+        "--card-foreground": "240 10% 3.9%",
+        "--popover": "0 0% 100%",
+        "--popover-foreground": "240 10% 3.9%",
+        "--primary": "20 100% 50%",
+        "--primary-foreground": "0 0% 98%",
+        "--secondary": "240 4.8% 95.9%",
+        "--secondary-foreground": "240 5.9% 10%",
+        "--muted": "240 4.8% 95.9%",
+        "--muted-foreground": "240 3.8% 46.1%",
+        "--accent": "240 4.8% 95.9%",
+        "--accent-foreground": "240 5.9% 10%",
+        "--destructive": "0 84.2% 60.2%",
+        "--destructive-foreground": "0 0% 98%",
+        "--border": "240 5.9% 90%",
+        "--input": "240 5.9% 90%",
+        "--ring": "20 100% 50%",
+        "--radius": "0.3rem"
+      },
+      "dark": {
+        "--background": "240 10% 3.9%",
+        "--foreground": "0 0% 98%",
+        "--card": "240 10% 5.9%",
+        "--card-foreground": "0 0% 98%",
+        "--popover": "240 10% 3.9%",
+        "--popover-foreground": "0 0% 98%",
+        "--primary": "20 100% 50%",
+        "--primary-foreground": "0 0% 98%",
+        "--secondary": "240 3.7% 15.9%",
+        "--secondary-foreground": "0 0% 98%",
+        "--muted": "240 3.7% 15.9%",
+        "--muted-foreground": "240 5% 64.9%",
+        "--accent": "240 3.7% 15.9%",
+        "--accent-foreground": "0 0% 98%",
+        "--destructive": "0 62.8% 30.6%",
+        "--destructive-foreground": "0 0% 98%",
+        "--border": "240 3.7% 15.9%",
+        "--input": "240 3.7% 15.9%",
+        "--ring": "20 100% 50%"
+      }
+    }
+  },
+  "layout": {
+    "spacing_scale": ["0", "1", "2", "4", "6", "8", "12", "16", "24", "32"],
+    "container_padding": "p-6 md:p-8 lg:p-12",
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6",
+    "bento_grid": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 auto-rows-[minmax(180px,auto)] gap-4",
+    "sidebar_width": "w-64",
+    "header_height": "h-16"
+  },
+  "components": {
+    "buttons": {
+      "default": "rounded-md font-medium transition-all active:scale-95",
+      "primary": "bg-primary text-primary-foreground hover:bg-primary/90 shadow-[0_0_15px_rgba(255,85,0,0.3)]",
+      "secondary": "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+      "ghost": "hover:bg-accent hover:text-accent-foreground",
+      "outline": "border border-input bg-background hover:bg-accent hover:text-accent-foreground"
+    },
+    "cards": {
+      "style": "rounded-lg border bg-card text-card-foreground shadow-sm",
+      "hover_effect": "hover:border-primary/50 transition-colors duration-300"
+    },
+    "inputs": {
+      "style": "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+    },
+    "tables": {
+      "style": "w-full caption-bottom text-sm",
+      "header": "border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted",
+      "row": "border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted"
+    }
+  },
+  "images": {
+    "landing_hero": "https://images.pexels.com/photos/4483556/pexels-photo-4483556.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "team_placeholder": "https://images.pexels.com/photos/7108269/pexels-photo-7108269.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+    "warehouse_stock": "https://images.unsplash.com/photo-1672552226650-796f40198c47?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2ODl8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjB3YXJlaG91c2UlMjBpbnZlbnRvcnklMjBoaWdoJTIwdGVjaHxlbnwwfHx8fDE3NzQxOTY0NzB8MA&ixlib=rb-4.1.0&q=85",
+    "logo_placeholder": "https://via.placeholder.com/150x50/FF5500/FFFFFF?text=CRM+Logo"
+  },
+  "visual_enhancers": {
+    "gradients": {
+      "primary_fade": "bg-gradient-to-br from-primary to-orange-600",
+      "dark_surface": "bg-gradient-to-b from-zinc-900 to-black"
+    },
+    "shadows": {
+      "neon_glow": "shadow-[0_0_10px_rgba(255,85,0,0.2)]",
+      "card_lift": "shadow-lg"
+    },
+    "borders": {
+      "subtle": "border border-zinc-800",
+      "highlight": "border-l-4 border-primary"
+    }
+  },
+  "motion": {
+    "page_transition": {
+      "initial": { "opacity": 0, "y": 10 },
+      "animate": { "opacity": 1, "y": 0 },
+      "exit": { "opacity": 0, "y": -10 },
+      "transition": { "duration": 0.3, "ease": "easeInOut" }
+    },
+    "hover_scale": {
+      "whileHover": { "scale": 1.02 }
+    }
+  },
+  "universal_guidelines": [
+    "Use 'sonner' for all toast notifications.",
+    "Do NOT use gradients for dark colors; rely on solid, deep shades.",
+    "Ensure 2-3x padding for 'luxurious' spacing.",
+    "Use 'Manrope' for all headings and 'Inter' for body text.",
+    "Use 'JetBrains Mono' for all data-heavy columns (ID, Price, SKU).",
+    "Primary color #FF5500 should be used for actions and highlights only, not backgrounds.",
+    "All interactive elements MUST have a data-testid attribute.",
+    "Dark mode is the priority; ensure all colors have high contrast on dark backgrounds."
+  ],
+  "instructions_to_main_agent": "Start by updating the Tailwind config and global CSS with the provided variables. Then, build the layout using the Sidebar + Header pattern. Use the 'Bento Grid' strategy for the dashboard widgets. Implement the components using the specified styling overrides."
+}
