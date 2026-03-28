@@ -17,6 +17,14 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/starxia_erp
 JWT_SECRET=pon-aqui-un-secreto-largo-y-unico
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-5-mini
+PASSWORD_RESET_BASE_URL=https://app.tudominio.com
+SMTP_HOST=smtp.tuproveedor.com
+SMTP_PORT=587
+SMTP_USERNAME=usuario-smtp
+SMTP_PASSWORD=tu-password-smtp
+SMTP_FROM_EMAIL=no-reply@tudominio.com
+SMTP_FROM_NAME=Starxia ERP
+SMTP_USE_TLS=true
 CORS_ORIGINS=https://app.tudominio.com,https://tudominio.com
 COOKIE_SECURE=true
 COOKIE_SAMESITE=lax
@@ -57,6 +65,7 @@ ENABLE_HEALTH_CHECK=false
 
 - El backend crea las tablas globales en `public` al arrancar por primera vez.
 - Cada nueva empresa crea automaticamente su propio schema aislado en Postgres y un almacen principal.
+- Si activas recuperacion de contrasena, configura tambien las variables SMTP y `PASSWORD_RESET_BASE_URL`.
 - Si quieres usar el dominio raiz para la app, ajusta `CORS_ORIGINS` para incluirlo.
 - Si trabajas con HTTPS, deja `COOKIE_SECURE=true`.
 - Si haces pruebas en local con HTTP, usa `COOKIE_SECURE=false`.

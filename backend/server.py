@@ -4,11 +4,14 @@ import json
 import logging
 import os
 import re
+import smtplib
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
  
 import pandas as pd
 from dotenv import load_dotenv
@@ -29,6 +32,14 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+PASSWORD_RESET_BASE_URL = os.environ.get("PASSWORD_RESET_BASE_URL", "http://localhost:3000")
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", "")
+SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Starxia ERP")
+SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -260,11 +271,24 @@ class RegisterInput(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
     company_name: str
+    company_tax_id: Optional[str] = None
+    company_address: Optional[str] = None
+    company_phone: Optional[str] = None
+    company_email: Optional[EmailStr] = None
 
 
 class LoginInput(BaseModel):
     email: EmailStr
     password: str
+
+
+class ForgotPasswordInput(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordInput(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8)
 
 
 class CreateUserInput(BaseModel):
@@ -436,6 +460,57 @@ def set_auth_cookie(response: Response, token: str) -> None:
         max_age=ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         path="/",
     )
+
+
+def create_password_reset_token(user: UserModel) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
+    payload = {
+        "sub": user.user_id,
+        "purpose": "password_reset",
+        "pwd": user.password_hash,
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def decode_password_reset_token(token: str) -> Dict[str, Any]:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except JWTError as exc:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token") from exc
+    if payload.get("purpose") != "password_reset":
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+    return payload
+
+
+def send_email_message(to_email: str, subject: str, body: str) -> None:
+    if not SMTP_HOST or not SMTP_FROM_EMAIL:
+        raise RuntimeError("SMTP is not configured")
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
+    message["To"] = to_email
+    message.set_content(body)
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+        if SMTP_USE_TLS:
+            smtp.starttls()
+        if SMTP_USERNAME:
+            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+        smtp.send_message(message)
+
+
+def send_password_reset_email(user: UserModel) -> None:
+    token = create_password_reset_token(user)
+    reset_url = f"{PASSWORD_RESET_BASE_URL}?{urlencode({'reset_token': token})}"
+    body = (
+        f"Hola {user.name},\n\n"
+        "Hemos recibido una solicitud para restablecer tu contrasena en Starxia ERP.\n\n"
+        f"Usa este enlace para crear una nueva contrasena:\n{reset_url}\n\n"
+        "Este enlace caduca en 2 horas. Si no solicitaste este cambio, puedes ignorar este correo.\n"
+    )
+    send_email_message(user.email, "Restablece tu contrasena de Starxia ERP", body)
 
 
 def get_token_from_request(request: Request, session_token: Optional[str]) -> str:
@@ -852,7 +927,15 @@ def register(data: RegisterInput, response: Response, db: Session = Depends(get_
     schema_name = slugify_schema_name(data.company_name)
     ensure_schema_exists(schema_name)
 
-    company = CompanyModel(company_id=prefixed_id("comp"), schema_name=schema_name, name=data.company_name.strip())
+    company = CompanyModel(
+        company_id=prefixed_id("comp"),
+        schema_name=schema_name,
+        name=data.company_name.strip(),
+        tax_id=data.company_tax_id.strip() if data.company_tax_id else None,
+        address=data.company_address.strip() if data.company_address else None,
+        phone=data.company_phone.strip() if data.company_phone else None,
+        email=data.company_email.lower() if data.company_email else None,
+    )
     user = UserModel(
         user_id=prefixed_id("user"),
         email=data.email.lower(),
@@ -906,6 +989,25 @@ def get_me(user: UserModel = Depends(get_current_user)) -> Dict[str, Any]:
 def logout(response: Response) -> Dict[str, str]:
     response.delete_cookie("session_token", path="/")
     return {"message": "Logged out"}
+
+
+@app.post("/api/auth/forgot-password")
+def forgot_password(data: ForgotPasswordInput, db: Session = Depends(get_public_db)) -> Dict[str, str]:
+    user = db.query(UserModel).filter(UserModel.email == data.email.lower()).first()
+    if user:
+        send_password_reset_email(user)
+    return {"message": "If the account exists, we have sent a password reset email"}
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(data: ResetPasswordInput, db: Session = Depends(get_public_db)) -> Dict[str, str]:
+    payload = decode_password_reset_token(data.token)
+    user = db.query(UserModel).filter(UserModel.user_id == payload.get("sub")).first()
+    if not user or payload.get("pwd") != user.password_hash:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    user.password_hash = hash_password(data.new_password)
+    db.commit()
+    return {"message": "Password updated"}
 
 
 @app.get("/api/companies")

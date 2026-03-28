@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
-import { Bot, Building2, FileText, Package, Shield, Users, BarChart3 } from "lucide-react";
+import { Bot, Building2, FileText, Package, Shield, Users, BarChart3, KeyRound } from "lucide-react";
 
 import { useAuth } from "@/App";
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,18 @@ import { API_BASE } from "@/lib/api";
 const API = API_BASE;
 
 const initialLogin = { email: "", password: "" };
-const initialRegister = { name: "", email: "", password: "", company_name: "" };
+const initialRegister = {
+  name: "",
+  email: "",
+  password: "",
+  company_name: "",
+  company_tax_id: "",
+  company_address: "",
+  company_phone: "",
+  company_email: "",
+};
+const initialForgotPassword = { email: "" };
+const initialResetPassword = { new_password: "", confirm_password: "" };
 const authInputClassName =
   "border-white/15 bg-white/5 text-white placeholder:text-zinc-500 caret-white autofill:bg-transparent";
 
@@ -55,15 +66,24 @@ const features = [
 const Landing = () => {
   const { user, setUser } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const resetToken = searchParams.get("reset_token") || "";
+
   const [loginForm, setLoginForm] = useState(initialLogin);
   const [registerForm, setRegisterForm] = useState(initialRegister);
+  const [forgotPasswordForm, setForgotPasswordForm] = useState(initialForgotPassword);
+  const [resetPasswordForm, setResetPasswordForm] = useState(initialResetPassword);
   const [submitting, setSubmitting] = useState(false);
+  const [requestingReset, setRequestingReset] = useState(false);
+  const [resettingPassword, setResettingPassword] = useState(false);
+
+  const hasResetToken = useMemo(() => Boolean(resetToken), [resetToken]);
 
   useEffect(() => {
-    if (user) {
+    if (user && !hasResetToken) {
       navigate("/dashboard");
     }
-  }, [user, navigate]);
+  }, [user, navigate, hasResetToken]);
 
   const handleLogin = async (event) => {
     event.preventDefault();
@@ -83,13 +103,58 @@ const Landing = () => {
     event.preventDefault();
     setSubmitting(true);
     try {
-      const response = await axios.post(`${API}/auth/register`, registerForm, { withCredentials: true });
+      const payload = {
+        ...registerForm,
+        company_tax_id: registerForm.company_tax_id || null,
+        company_address: registerForm.company_address || null,
+        company_phone: registerForm.company_phone || null,
+        company_email: registerForm.company_email || null,
+      };
+      const response = await axios.post(`${API}/auth/register`, payload, { withCredentials: true });
       setUser(response.data);
       navigate("/dashboard");
     } catch (error) {
       toast.error(error.response?.data?.detail || "No se pudo crear la cuenta");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleForgotPassword = async (event) => {
+    event.preventDefault();
+    setRequestingReset(true);
+    try {
+      await axios.post(`${API}/auth/forgot-password`, forgotPasswordForm, { withCredentials: true });
+      toast.success("Si el email existe, te hemos enviado un enlace para cambiar la contrasena");
+      setForgotPasswordForm(initialForgotPassword);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo procesar la solicitud");
+    } finally {
+      setRequestingReset(false);
+    }
+  };
+
+  const handleResetPassword = async (event) => {
+    event.preventDefault();
+    if (resetPasswordForm.new_password !== resetPasswordForm.confirm_password) {
+      toast.error("Las contrasenas no coinciden");
+      return;
+    }
+
+    setResettingPassword(true);
+    try {
+      await axios.post(
+        `${API}/auth/reset-password`,
+        { token: resetToken, new_password: resetPasswordForm.new_password },
+        { withCredentials: true }
+      );
+      toast.success("Contrasena actualizada. Ya puedes iniciar sesion.");
+      setResetPasswordForm(initialResetPassword);
+      setSearchParams({});
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo actualizar la contrasena");
+    } finally {
+      setResettingPassword(false);
     }
   };
 
@@ -125,103 +190,216 @@ const Landing = () => {
 
           <Card className="border-white/10 bg-zinc-950/80 shadow-2xl shadow-black/30">
             <CardHeader>
-              <CardTitle className="text-2xl text-white">Acceso privado</CardTitle>
-              <CardDescription>Entra con tu cuenta o crea la primera empresa administradora.</CardDescription>
+              <CardTitle className="text-2xl text-white">
+                {hasResetToken ? "Restablecer contrasena" : "Acceso privado"}
+              </CardTitle>
+              <CardDescription>
+                {hasResetToken
+                  ? "Define una nueva contrasena para tu usuario."
+                  : "Entra con tu cuenta o crea la primera empresa administradora."}
+              </CardDescription>
             </CardHeader>
             <CardContent>
-              <Tabs defaultValue="login" className="space-y-6">
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="login">Iniciar sesion</TabsTrigger>
-                  <TabsTrigger value="register">Crear cuenta</TabsTrigger>
-                </TabsList>
+              {hasResetToken ? (
+                <form className="space-y-4" onSubmit={handleResetPassword}>
+                  <div className="space-y-2">
+                    <Label htmlFor="reset-password" className="text-zinc-200">Nueva contrasena</Label>
+                    <Input
+                      id="reset-password"
+                      type="password"
+                      minLength={8}
+                      value={resetPasswordForm.new_password}
+                      onChange={(event) => setResetPasswordForm({ ...resetPasswordForm, new_password: event.target.value })}
+                      placeholder="Minimo 8 caracteres"
+                      className={authInputClassName}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="reset-password-confirm" className="text-zinc-200">Confirmar contrasena</Label>
+                    <Input
+                      id="reset-password-confirm"
+                      type="password"
+                      minLength={8}
+                      value={resetPasswordForm.confirm_password}
+                      onChange={(event) => setResetPasswordForm({ ...resetPasswordForm, confirm_password: event.target.value })}
+                      placeholder="Repite la nueva contrasena"
+                      className={authInputClassName}
+                      required
+                    />
+                  </div>
+                  <Button className="w-full" type="submit" disabled={resettingPassword}>
+                    {resettingPassword ? "Actualizando..." : "Guardar nueva contrasena"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="w-full text-zinc-300"
+                    onClick={() => setSearchParams({})}
+                  >
+                    Volver al acceso
+                  </Button>
+                </form>
+              ) : (
+                <Tabs defaultValue="login" className="space-y-6">
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="login">Iniciar sesion</TabsTrigger>
+                    <TabsTrigger value="register">Crear cuenta</TabsTrigger>
+                  </TabsList>
 
-                <TabsContent value="login">
-                  <form className="space-y-4" onSubmit={handleLogin}>
-                    <div className="space-y-2">
-                      <Label htmlFor="login-email" className="text-zinc-200">Email</Label>
-                      <Input
-                        id="login-email"
-                        type="email"
-                        value={loginForm.email}
-                        onChange={(event) => setLoginForm({ ...loginForm, email: event.target.value })}
-                        placeholder="admin@tuempresa.com"
-                        className={authInputClassName}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="login-password" className="text-zinc-200">Contrasena</Label>
-                      <Input
-                        id="login-password"
-                        type="password"
-                        value={loginForm.password}
-                        onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })}
-                        placeholder="Tu contrasena"
-                        className={authInputClassName}
-                        required
-                      />
-                    </div>
-                    <Button className="w-full" type="submit" disabled={submitting}>
-                      {submitting ? "Entrando..." : "Entrar al ERP"}
-                    </Button>
-                  </form>
-                </TabsContent>
+                  <TabsContent value="login" className="space-y-6">
+                    <form className="space-y-4" onSubmit={handleLogin}>
+                      <div className="space-y-2">
+                        <Label htmlFor="login-email" className="text-zinc-200">Email</Label>
+                        <Input
+                          id="login-email"
+                          type="email"
+                          value={loginForm.email}
+                          onChange={(event) => setLoginForm({ ...loginForm, email: event.target.value })}
+                          placeholder="admin@tuempresa.com"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="login-password" className="text-zinc-200">Contrasena</Label>
+                        <Input
+                          id="login-password"
+                          type="password"
+                          value={loginForm.password}
+                          onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })}
+                          placeholder="Tu contrasena"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <Button className="w-full" type="submit" disabled={submitting}>
+                        {submitting ? "Entrando..." : "Entrar al ERP"}
+                      </Button>
+                    </form>
 
-                <TabsContent value="register">
-                  <form className="space-y-4" onSubmit={handleRegister}>
-                    <div className="space-y-2">
-                      <Label htmlFor="register-company" className="text-zinc-200">Empresa</Label>
-                      <Input
-                        id="register-company"
-                        value={registerForm.company_name}
-                        onChange={(event) => setRegisterForm({ ...registerForm, company_name: event.target.value })}
-                        placeholder="Starxia Operations"
-                        className={authInputClassName}
-                        required
-                      />
+                    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+                      <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white">
+                        <KeyRound className="h-4 w-4 text-primary" />
+                        Olvide mi contrasena
+                      </div>
+                      <form className="space-y-3" onSubmit={handleForgotPassword}>
+                        <Input
+                          type="email"
+                          value={forgotPasswordForm.email}
+                          onChange={(event) => setForgotPasswordForm({ email: event.target.value })}
+                          placeholder="Tu email de acceso"
+                          className={authInputClassName}
+                          required
+                        />
+                        <Button type="submit" variant="secondary" className="w-full" disabled={requestingReset}>
+                          {requestingReset ? "Enviando..." : "Enviar enlace de recuperacion"}
+                        </Button>
+                      </form>
                     </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="register-name" className="text-zinc-200">Nombre</Label>
-                      <Input
-                        id="register-name"
-                        value={registerForm.name}
-                        onChange={(event) => setRegisterForm({ ...registerForm, name: event.target.value })}
-                        placeholder="Tu nombre"
-                        className={authInputClassName}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="register-email" className="text-zinc-200">Email</Label>
-                      <Input
-                        id="register-email"
-                        type="email"
-                        value={registerForm.email}
-                        onChange={(event) => setRegisterForm({ ...registerForm, email: event.target.value })}
-                        placeholder="admin@tuempresa.com"
-                        className={authInputClassName}
-                        required
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="register-password" className="text-zinc-200">Contrasena</Label>
-                      <Input
-                        id="register-password"
-                        type="password"
-                        minLength={8}
-                        value={registerForm.password}
-                        onChange={(event) => setRegisterForm({ ...registerForm, password: event.target.value })}
-                        placeholder="Minimo 8 caracteres"
-                        className={authInputClassName}
-                        required
-                      />
-                    </div>
-                    <Button className="w-full" type="submit" disabled={submitting}>
-                      {submitting ? "Creando..." : "Crear empresa y acceder"}
-                    </Button>
-                  </form>
-                </TabsContent>
-              </Tabs>
+                  </TabsContent>
+
+                  <TabsContent value="register">
+                    <form className="space-y-4" onSubmit={handleRegister}>
+                      <div className="space-y-2">
+                        <Label htmlFor="register-company" className="text-zinc-200">Empresa</Label>
+                        <Input
+                          id="register-company"
+                          value={registerForm.company_name}
+                          onChange={(event) => setRegisterForm({ ...registerForm, company_name: event.target.value })}
+                          placeholder="Starxia Operations"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="register-company-email" className="text-zinc-200">Email de empresa</Label>
+                          <Input
+                            id="register-company-email"
+                            type="email"
+                            value={registerForm.company_email}
+                            onChange={(event) => setRegisterForm({ ...registerForm, company_email: event.target.value })}
+                            placeholder="info@tuempresa.com"
+                            className={authInputClassName}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="register-company-phone" className="text-zinc-200">Telefono de empresa</Label>
+                          <Input
+                            id="register-company-phone"
+                            value={registerForm.company_phone}
+                            onChange={(event) => setRegisterForm({ ...registerForm, company_phone: event.target.value })}
+                            placeholder="+34 600 000 000"
+                            className={authInputClassName}
+                          />
+                        </div>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="register-company-tax-id" className="text-zinc-200">NIF/CIF</Label>
+                          <Input
+                            id="register-company-tax-id"
+                            value={registerForm.company_tax_id}
+                            onChange={(event) => setRegisterForm({ ...registerForm, company_tax_id: event.target.value })}
+                            placeholder="B12345678"
+                            className={authInputClassName}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="register-name" className="text-zinc-200">Nombre del admin</Label>
+                          <Input
+                            id="register-name"
+                            value={registerForm.name}
+                            onChange={(event) => setRegisterForm({ ...registerForm, name: event.target.value })}
+                            placeholder="Tu nombre"
+                            className={authInputClassName}
+                            required
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="register-company-address" className="text-zinc-200">Direccion</Label>
+                        <Input
+                          id="register-company-address"
+                          value={registerForm.company_address}
+                          onChange={(event) => setRegisterForm({ ...registerForm, company_address: event.target.value })}
+                          placeholder="Calle, ciudad y provincia"
+                          className={authInputClassName}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="register-email" className="text-zinc-200">Email de acceso</Label>
+                        <Input
+                          id="register-email"
+                          type="email"
+                          value={registerForm.email}
+                          onChange={(event) => setRegisterForm({ ...registerForm, email: event.target.value })}
+                          placeholder="admin@tuempresa.com"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="register-password" className="text-zinc-200">Contrasena</Label>
+                        <Input
+                          id="register-password"
+                          type="password"
+                          minLength={8}
+                          value={registerForm.password}
+                          onChange={(event) => setRegisterForm({ ...registerForm, password: event.target.value })}
+                          placeholder="Minimo 8 caracteres"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <Button className="w-full" type="submit" disabled={submitting}>
+                        {submitting ? "Creando..." : "Crear empresa y acceder"}
+                      </Button>
+                    </form>
+                  </TabsContent>
+                </Tabs>
+              )}
             </CardContent>
           </Card>
         </div>
