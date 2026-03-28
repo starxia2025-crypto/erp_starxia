@@ -1548,11 +1548,11 @@ IMPORTANTE:
   HISTORIAL RECIENTE:
   {history_text}
   
-  CLIENTES:
-  {[{"nombre": item.name, "email": item.email, "id": item.client_id} for item in clients]}
+CLIENTES:
+{[{"nombre": item.name, "email": item.email, "telefono": item.phone, "id": item.client_id} for item in clients]}
 
 PROVEEDORES:
-{[{"nombre": item.name, "email": item.email, "id": item.supplier_id} for item in suppliers]}
+{[{"nombre": item.name, "email": item.email, "telefono": item.phone, "id": item.supplier_id} for item in suppliers]}
 
 PRODUCTOS:
 {[{"nombre": item.name, "sku": item.sku, "precio": item.price, "id": item.product_id} for item in products]}
