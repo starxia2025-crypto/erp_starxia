@@ -723,6 +723,30 @@ def execute_ai_write_action(action: Dict[str, Any], user: UserModel, db: Session
     return "Todavia no puedo escribir ese tipo de entidad desde el asistente IA. Ahora mismo soporto clientes, proveedores, productos y almacenes."
 
 
+def try_direct_read_response(user_message: str, user: UserModel, db: Session) -> Optional[str]:
+    normalized = user_message.strip()
+
+    prefix_match = re.search(
+        r'productos?\s+que\s+empiecen\s+por\s+["“]?([A-Za-z0-9ÁÉÍÓÚáéíóúÑñ])["”]?',
+        normalized,
+        re.IGNORECASE,
+    )
+    if prefix_match:
+        prefix = prefix_match.group(1)
+        products = (
+            company_filter(db.query(ProductModel), ProductModel, user)
+            .filter(ProductModel.name.ilike(f"{prefix}%"))
+            .order_by(ProductModel.name.asc())
+            .all()
+        )
+        if not products:
+            return f"No hay productos que empiecen por '{prefix}'."
+        lines = [f"{index}. {item.name} - SKU: {item.sku} - Precio: {item.price}" for index, item in enumerate(products, start=1)]
+        return f"Aqui tienes los productos que empiezan por '{prefix}':\n\n" + "\n".join(lines)
+
+    return None
+
+
 @app.on_event("startup")
 def startup() -> None:
     PublicBase.metadata.create_all(bind=engine)
@@ -1528,6 +1552,19 @@ async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_curre
         db.add(assistant_msg)
         db.commit()
         return {"response": ai_response, "message_id": assistant_msg.message_id}
+
+    direct_response = try_direct_read_response(user_message, user, db)
+    if direct_response:
+        assistant_msg = ChatMessageModel(
+            message_id=prefixed_id("msg"),
+            user_id=user.user_id,
+            company_id=user.company_id,
+            role="assistant",
+            content=direct_response,
+        )
+        db.add(assistant_msg)
+        db.commit()
+        return {"response": direct_response, "message_id": assistant_msg.message_id}
 
     clients = company_filter(db.query(ClientModel), ClientModel, user).limit(20).all()
     suppliers = company_filter(db.query(SupplierModel), SupplierModel, user).limit(20).all()
