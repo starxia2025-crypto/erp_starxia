@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -466,27 +467,24 @@ async def generate_ai_response(context: str, user_message: str) -> str:
 
 
 def is_write_intent(message: str) -> bool:
-    normalized = message.lower()
+    normalized = message.lower().strip()
+    normalized = "".join(
+        char for char in unicodedata.normalize("NFKD", normalized) if not unicodedata.combining(char)
+    )
+    normalized = normalized.lstrip("¿?¡!.,:; ")
     read_starters = [
         "cuantos",
-        "cuántos",
         "cuantas",
-        "cuántas",
         "muestrame",
-        "muéstrame",
         "busca",
         "dime",
         "lista",
         "ensename",
-        "enséñame",
         "cuales",
-        "cuáles",
         "tengo",
         "hay",
         "donde",
-        "dónde",
         "que ",
-        "qué ",
     ]
     if any(normalized.startswith(prefix) for prefix in read_starters):
         return False
@@ -513,7 +511,10 @@ def is_write_intent(message: str) -> bool:
         "crea una factura",
         "crea un pedido",
     ]
-    return any(keyword in normalized for keyword in write_keywords)
+    tokens = set(re.findall(r"[a-z0-9_@.]+", normalized))
+    return any(keyword in normalized for keyword in write_keywords) or bool(tokens.intersection(
+        {"crear", "crea", "creame", "registra", "registrar", "anade", "agrega", "modifica", "editar", "edita", "actualiza"}
+    ))
 
 
 def clean_json_response(raw: str) -> str:
