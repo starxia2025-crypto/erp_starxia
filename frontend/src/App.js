@@ -1,5 +1,5 @@
 import "@/App.css";
-import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useEffect, useState, createContext, useContext, useCallback } from "react";
 import axios from "axios";
 import { Toaster } from "@/components/ui/sonner";
@@ -71,13 +71,6 @@ export const AuthProvider = ({ children }) => {
 // Protected Route
 const ProtectedRoute = ({ children }) => {
   const { user, loading } = useAuth();
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    if (!loading && !user) {
-      navigate('/', { replace: true });
-    }
-  }, [user, loading, navigate]);
 
   if (loading) {
     return (
@@ -88,7 +81,7 @@ const ProtectedRoute = ({ children }) => {
   }
 
   if (!user) {
-    return null;
+    return <Navigate to="/" replace />;
   }
 
   return children;

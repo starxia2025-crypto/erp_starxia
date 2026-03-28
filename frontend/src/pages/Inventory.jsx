@@ -30,7 +30,7 @@ const Inventory = () => {
   const [warehouses, setWarehouses] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [selectedWarehouse, setSelectedWarehouse] = useState("");
+  const [selectedWarehouse, setSelectedWarehouse] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [editingInventory, setEditingInventory] = useState(null);
@@ -48,7 +48,10 @@ const Inventory = () => {
   const fetchData = async () => {
     try {
       const [invRes, prodRes, whRes] = await Promise.all([
-        axios.get(`${API}/inventory${selectedWarehouse ? `?warehouse_id=${selectedWarehouse}` : ''}`, { withCredentials: true }),
+        axios.get(
+          `${API}/inventory${selectedWarehouse !== "all" ? `?warehouse_id=${selectedWarehouse}` : ""}`,
+          { withCredentials: true }
+        ),
         axios.get(`${API}/products`, { withCredentials: true }),
         axios.get(`${API}/warehouses`, { withCredentials: true })
       ]);
@@ -103,7 +106,7 @@ const Inventory = () => {
 
     const formData = new FormData();
     formData.append("file", file);
-    if (selectedWarehouse) {
+    if (selectedWarehouse !== "all") {
       formData.append("warehouse_id", selectedWarehouse);
     }
 
@@ -166,7 +169,7 @@ const Inventory = () => {
                 <SelectValue placeholder="Todos los almacenes" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">Todos los almacenes</SelectItem>
+                <SelectItem value="all">Todos los almacenes</SelectItem>
                 {warehouses.map((wh) => (
                   <SelectItem key={wh.warehouse_id} value={wh.warehouse_id}>{wh.name}</SelectItem>
                 ))}
