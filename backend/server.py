@@ -2,6 +2,7 @@ import csv
 import io
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ from jose import JWTError, jwt
 from openai import AsyncOpenAI
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import JSON, DateTime, Float, Integer, MetaData, String, Text, UniqueConstraint, create_engine, text
 from sqlalchemy.orm import Session, declarative_base, mapped_column, sessionmaker
 from starlette.middleware.cors import CORSMiddleware
 
@@ -37,8 +38,10 @@ ACCESS_TOKEN_EXPIRE_DAYS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_DAYS", "7"))
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
-Base = declarative_base()
+PublicSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
+TenantSessionLocal = sessionmaker(autocommit=False, autoflush=False, future=True)
+PublicBase = declarative_base()
+TenantBase = declarative_base(metadata=MetaData(schema="tenant"))
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -59,10 +62,11 @@ class UpdatedTimestampMixin:
     )
 
 
-class CompanyModel(Base, TimestampMixin):
+class CompanyModel(PublicBase, TimestampMixin):
     __tablename__ = "companies"
 
     company_id = mapped_column(String(32), primary_key=True)
+    schema_name = mapped_column(String(63), unique=True, nullable=False, index=True)
     name = mapped_column(String(255), nullable=False)
     tax_id = mapped_column(String(64))
     address = mapped_column(Text)
@@ -70,7 +74,7 @@ class CompanyModel(Base, TimestampMixin):
     email = mapped_column(String(255))
 
 
-class UserModel(Base, TimestampMixin):
+class UserModel(PublicBase, TimestampMixin):
     __tablename__ = "users"
 
     user_id = mapped_column(String(32), primary_key=True)
@@ -82,7 +86,7 @@ class UserModel(Base, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class ClientTypeModel(Base):
+class ClientTypeModel(TenantBase):
     __tablename__ = "client_types"
 
     type_id = mapped_column(String(32), primary_key=True)
@@ -91,7 +95,7 @@ class ClientTypeModel(Base):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class ClientModel(Base, TimestampMixin):
+class ClientModel(TenantBase, TimestampMixin):
     __tablename__ = "clients"
 
     client_id = mapped_column(String(32), primary_key=True)
@@ -105,7 +109,7 @@ class ClientModel(Base, TimestampMixin):
     balance = mapped_column(Float, default=0.0, nullable=False)
 
 
-class SupplierTypeModel(Base):
+class SupplierTypeModel(TenantBase):
     __tablename__ = "supplier_types"
 
     type_id = mapped_column(String(32), primary_key=True)
@@ -114,7 +118,7 @@ class SupplierTypeModel(Base):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class SupplierModel(Base, TimestampMixin):
+class SupplierModel(TenantBase, TimestampMixin):
     __tablename__ = "suppliers"
 
     supplier_id = mapped_column(String(32), primary_key=True)
@@ -128,7 +132,7 @@ class SupplierModel(Base, TimestampMixin):
     balance = mapped_column(Float, default=0.0, nullable=False)
 
 
-class ProductTypeModel(Base):
+class ProductTypeModel(TenantBase):
     __tablename__ = "product_types"
 
     type_id = mapped_column(String(32), primary_key=True)
@@ -137,7 +141,7 @@ class ProductTypeModel(Base):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class ProductModel(Base, TimestampMixin):
+class ProductModel(TenantBase, TimestampMixin):
     __tablename__ = "products"
 
     product_id = mapped_column(String(32), primary_key=True)
@@ -150,7 +154,7 @@ class ProductModel(Base, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class WarehouseModel(Base, TimestampMixin):
+class WarehouseModel(TenantBase, TimestampMixin):
     __tablename__ = "warehouses"
 
     warehouse_id = mapped_column(String(32), primary_key=True)
@@ -159,7 +163,7 @@ class WarehouseModel(Base, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class InventoryModel(Base, UpdatedTimestampMixin):
+class InventoryModel(TenantBase, UpdatedTimestampMixin):
     __tablename__ = "inventory"
     __table_args__ = (UniqueConstraint("company_id", "product_id", "warehouse_id", name="uq_inventory_scope"),)
 
@@ -171,7 +175,7 @@ class InventoryModel(Base, UpdatedTimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class OrderModel(Base, TimestampMixin):
+class OrderModel(TenantBase, TimestampMixin):
     __tablename__ = "orders"
 
     order_id = mapped_column(String(32), primary_key=True)
@@ -187,7 +191,7 @@ class OrderModel(Base, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class InvoiceModel(Base, TimestampMixin):
+class InvoiceModel(TenantBase, TimestampMixin):
     __tablename__ = "invoices"
 
     invoice_id = mapped_column(String(32), primary_key=True)
@@ -205,7 +209,7 @@ class InvoiceModel(Base, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class PurchaseOrderModel(Base, TimestampMixin):
+class PurchaseOrderModel(TenantBase, TimestampMixin):
     __tablename__ = "purchase_orders"
 
     po_id = mapped_column(String(32), primary_key=True)
@@ -221,7 +225,7 @@ class PurchaseOrderModel(Base, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class PurchaseInvoiceModel(Base, TimestampMixin):
+class PurchaseInvoiceModel(TenantBase, TimestampMixin):
     __tablename__ = "purchase_invoices"
 
     pinv_id = mapped_column(String(32), primary_key=True)
@@ -239,7 +243,7 @@ class PurchaseInvoiceModel(Base, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
-class ChatMessageModel(Base, TimestampMixin):
+class ChatMessageModel(TenantBase, TimestampMixin):
     __tablename__ = "chat_messages"
 
     message_id = mapped_column(String(32), primary_key=True)
@@ -264,12 +268,16 @@ class LoginInput(BaseModel):
 app = FastAPI(title="Starxia ERP API")
 
 
-def get_db():
-    db = SessionLocal()
+def get_public_db():
+    db = PublicSessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+def get_tenant_bind(schema_name: str):
+    return engine.execution_options(schema_translate_map={"tenant": schema_name})
 
 
 def prefixed_id(prefix: str) -> str:
@@ -312,9 +320,29 @@ def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
 
 
+def slugify_schema_name(company_name: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", company_name.lower()).strip("_")
+    normalized = normalized or "tenant"
+    return f"tenant_{normalized[:30]}_{uuid.uuid4().hex[:8]}"
+
+
+def ensure_schema_exists(schema_name: str) -> None:
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", schema_name):
+        raise ValueError("Invalid schema name")
+    with engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
+        tenant_bind = connection.execution_options(schema_translate_map={"tenant": schema_name})
+        TenantBase.metadata.create_all(bind=tenant_bind)
+
+
 def create_access_token(user: UserModel) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
-    payload = {"sub": user.user_id, "company_id": user.company_id, "exp": expires_at}
+    payload = {
+        "sub": user.user_id,
+        "company_id": user.company_id,
+        "company_schema": getattr(user, "company_schema", None),
+        "exp": expires_at,
+    }
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
@@ -343,7 +371,7 @@ def get_token_from_request(request: Request, session_token: Optional[str]) -> st
 
 def get_current_user(
     request: Request,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_public_db),
     session_token: Optional[str] = Cookie(default=None),
 ) -> UserModel:
     token = get_token_from_request(request, session_token)
@@ -355,7 +383,19 @@ def get_current_user(
     user = db.query(UserModel).filter(UserModel.user_id == payload.get("sub")).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    if not company:
+        raise HTTPException(status_code=401, detail="Company not found")
+    setattr(user, "company_schema", company.schema_name)
     return user
+
+
+def get_db(user: UserModel = Depends(get_current_user)):
+    db = TenantSessionLocal(bind=get_tenant_bind(user.company_schema))
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def ensure_company_scope(user: UserModel, company_id: str) -> None:
@@ -426,7 +466,7 @@ async def generate_ai_response(context: str, user_message: str) -> str:
 
 @app.on_event("startup")
 def startup() -> None:
-    Base.metadata.create_all(bind=engine)
+    PublicBase.metadata.create_all(bind=engine)
 
 
 @app.get("/health")
@@ -435,12 +475,15 @@ def health() -> Dict[str, str]:
 
 
 @app.post("/api/auth/register")
-def register(data: RegisterInput, response: Response, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def register(data: RegisterInput, response: Response, db: Session = Depends(get_public_db)) -> Dict[str, Any]:
     existing = db.query(UserModel).filter(UserModel.email == data.email.lower()).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    company = CompanyModel(company_id=prefixed_id("comp"), name=data.company_name.strip())
+    schema_name = slugify_schema_name(data.company_name)
+    ensure_schema_exists(schema_name)
+
+    company = CompanyModel(company_id=prefixed_id("comp"), schema_name=schema_name, name=data.company_name.strip())
     user = UserModel(
         user_id=prefixed_id("user"),
         email=data.email.lower(),
@@ -449,27 +492,37 @@ def register(data: RegisterInput, response: Response, db: Session = Depends(get_
         role="admin",
         company_id=company.company_id,
     )
-    warehouse = WarehouseModel(
-        warehouse_id=prefixed_id("wh"),
-        name="Almacen Principal",
-        company_id=company.company_id,
-    )
-
     db.add(company)
     db.add(user)
-    db.add(warehouse)
     db.commit()
     db.refresh(user)
+    setattr(user, "company_schema", schema_name)
+
+    tenant_db = TenantSessionLocal(bind=get_tenant_bind(schema_name))
+    try:
+        warehouse = WarehouseModel(
+            warehouse_id=prefixed_id("wh"),
+            name="Almacen Principal",
+            company_id=company.company_id,
+        )
+        tenant_db.add(warehouse)
+        tenant_db.commit()
+    finally:
+        tenant_db.close()
 
     set_auth_cookie(response, create_access_token(user))
     return model_to_dict(user, exclude={"password_hash"})
 
 
 @app.post("/api/auth/login")
-def login(data: LoginInput, response: Response, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def login(data: LoginInput, response: Response, db: Session = Depends(get_public_db)) -> Dict[str, Any]:
     user = db.query(UserModel).filter(UserModel.email == data.email.lower()).first()
     if not user or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    if not company:
+        raise HTTPException(status_code=401, detail="Company not found")
+    setattr(user, "company_schema", company.schema_name)
 
     set_auth_cookie(response, create_access_token(user))
     return model_to_dict(user, exclude={"password_hash"})
@@ -487,7 +540,7 @@ def logout(response: Response) -> Dict[str, str]:
 
 
 @app.get("/api/companies")
-def get_companies(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+def get_companies(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
     companies = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).all()
     return [model_to_dict(company) for company in companies]
 
@@ -497,7 +550,7 @@ def update_company(
     company_id: str,
     data: Dict[str, Any],
     user: UserModel = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_public_db),
 ) -> Dict[str, Any]:
     ensure_company_scope(user, company_id)
     company = first_or_404(db.query(CompanyModel).filter(CompanyModel.company_id == company_id), "Company not found")
@@ -510,7 +563,7 @@ def update_company(
 
 
 @app.get("/api/users")
-def get_users(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+def get_users(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
     users = db.query(UserModel).filter(UserModel.company_id == user.company_id).all()
     return [model_to_dict(item, exclude={"password_hash"}) for item in users]
 

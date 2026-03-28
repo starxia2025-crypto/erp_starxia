@@ -5,6 +5,8 @@
 - Servicio `starxia-erp-api`: FastAPI en `backend`
 - Servicio `starxia-erp-web`: build estatico React en `frontend`
 - Servicio `starxia-erp-db`: Postgres gestionado por Easypanel
+- `public` en Postgres para identidad global (`companies`, `users`)
+- un schema dedicado por empresa para clientes, productos, inventario, ventas, compras e IA
 
 ## Variables backend
 
@@ -53,8 +55,8 @@ ENABLE_HEALTH_CHECK=false
 
 ## Notas
 
-- El backend crea las tablas automaticamente al arrancar por primera vez.
-- El primer usuario que se registra crea tambien la empresa y un almacen principal.
+- El backend crea las tablas globales en `public` al arrancar por primera vez.
+- Cada nueva empresa crea automaticamente su propio schema aislado en Postgres y un almacen principal.
 - Si quieres usar el dominio raiz para la app, ajusta `CORS_ORIGINS` para incluirlo.
 - Si trabajas con HTTPS, deja `COOKIE_SECURE=true`.
 - Si haces pruebas en local con HTTP, usa `COOKIE_SECURE=false`.
