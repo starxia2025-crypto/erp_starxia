@@ -267,7 +267,65 @@ class LoginInput(BaseModel):
     password: str
 
 
+class CreateUserInput(BaseModel):
+    name: str
+    email: EmailStr
+    password: str = Field(min_length=8)
+    role: str
+
+
+class UpdateUserInput(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+
+
 app = FastAPI(title="Starxia ERP API")
+
+ROLE_PERMISSIONS = {
+    "admin": {"*"},
+    "manager": {
+        "dashboard.read",
+        "clients.read",
+        "clients.write",
+        "suppliers.read",
+        "suppliers.write",
+        "products.read",
+        "products.write",
+        "inventory.read",
+        "inventory.write",
+        "sales.read",
+        "sales.write",
+        "purchases.read",
+        "purchases.write",
+        "reports.read",
+        "settings.read",
+        "ai.read",
+        "users.read",
+    },
+    "sales": {
+        "dashboard.read",
+        "clients.read",
+        "clients.write",
+        "sales.read",
+        "sales.write",
+        "ai.read",
+    },
+    "warehouse": {
+        "dashboard.read",
+        "products.read",
+        "products.write",
+        "inventory.read",
+        "inventory.write",
+        "ai.read",
+    },
+}
+VALID_ROLES = set(ROLE_PERMISSIONS.keys())
+ENTITY_PERMISSION_MAP = {
+    "client": "clients",
+    "supplier": "suppliers",
+    "product": "products",
+    "warehouse": "inventory",
+}
 
 
 def get_public_db():
@@ -302,6 +360,26 @@ def model_to_dict(instance: Any, exclude: Optional[set[str]] = None) -> Dict[str
             continue
         value = getattr(instance, column.name)
         data[column.name] = serialize_datetime(value) if isinstance(value, datetime) else value
+    return data
+
+
+def permissions_for_role(role: str) -> set[str]:
+    return ROLE_PERMISSIONS.get(role, set())
+
+
+def user_has_permission(user: UserModel, permission: str) -> bool:
+    perms = permissions_for_role(user.role)
+    return "*" in perms or permission in perms
+
+
+def require_permission(user: UserModel, permission: str) -> None:
+    if not user_has_permission(user, permission):
+        raise HTTPException(status_code=403, detail="Not authorized for this action")
+
+
+def serialize_user(user: UserModel) -> Dict[str, Any]:
+    data = model_to_dict(user, exclude={"password_hash"})
+    data["permissions"] = sorted(permissions_for_role(user.role))
     return data
 
 
@@ -606,6 +684,12 @@ def execute_ai_write_action(action: Dict[str, Any], user: UserModel, db: Session
     if intent not in {"create", "update"}:
         return None
 
+    module_name = ENTITY_PERMISSION_MAP.get(entity)
+    if not module_name:
+        return "Todavia no puedo escribir ese tipo de entidad desde el asistente IA."
+    if not user_has_permission(user, f"{module_name}.write"):
+        return "Tu rol no tiene permiso para crear o editar ese tipo de datos."
+
     if entity == "client":
         if intent == "create":
             if not data.get("name"):
@@ -732,6 +816,8 @@ def try_direct_read_response(user_message: str, user: UserModel, db: Session) ->
         re.IGNORECASE,
     )
     if prefix_match:
+        if not user_has_permission(user, "products.read"):
+            return "Tu rol no tiene permiso para consultar productos."
         prefix = prefix_match.group(1)
         products = (
             company_filter(db.query(ProductModel), ProductModel, user)
@@ -794,7 +880,7 @@ def register(data: RegisterInput, response: Response, db: Session = Depends(get_
         tenant_db.close()
 
     set_auth_cookie(response, create_access_token(user))
-    return model_to_dict(user, exclude={"password_hash"})
+    return serialize_user(user)
 
 
 @app.post("/api/auth/login")
@@ -808,12 +894,12 @@ def login(data: LoginInput, response: Response, db: Session = Depends(get_public
     setattr(user, "company_schema", company.schema_name)
 
     set_auth_cookie(response, create_access_token(user))
-    return model_to_dict(user, exclude={"password_hash"})
+    return serialize_user(user)
 
 
 @app.get("/api/auth/me")
 def get_me(user: UserModel = Depends(get_current_user)) -> Dict[str, Any]:
-    return model_to_dict(user, exclude={"password_hash"})
+    return serialize_user(user)
 
 
 @app.post("/api/auth/logout")
@@ -824,6 +910,7 @@ def logout(response: Response) -> Dict[str, str]:
 
 @app.get("/api/companies")
 def get_companies(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "settings.read")
     companies = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).all()
     return [model_to_dict(company) for company in companies]
 
@@ -835,6 +922,7 @@ def update_company(
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_public_db),
 ) -> Dict[str, Any]:
+    require_permission(user, "settings.write")
     ensure_company_scope(user, company_id)
     company = first_or_404(db.query(CompanyModel).filter(CompanyModel.company_id == company_id), "Company not found")
     for field in ["name", "tax_id", "address", "phone", "email"]:
@@ -847,8 +935,54 @@ def update_company(
 
 @app.get("/api/users")
 def get_users(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "users.read")
     users = db.query(UserModel).filter(UserModel.company_id == user.company_id).all()
-    return [model_to_dict(item, exclude={"password_hash"}) for item in users]
+    return [serialize_user(item) for item in users]
+
+
+@app.post("/api/users")
+def create_user(data: CreateUserInput, user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+    require_permission(user, "users.write")
+    role = data.role.strip().lower()
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    existing = db.query(UserModel).filter(UserModel.email == data.email.lower()).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    new_user = UserModel(
+        user_id=prefixed_id("user"),
+        email=data.email.lower(),
+        password_hash=hash_password(data.password),
+        name=data.name.strip(),
+        role=role,
+        company_id=user.company_id,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return serialize_user(new_user)
+
+
+@app.put("/api/users/{user_id}")
+def update_user(user_id: str, data: UpdateUserInput, user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+    require_permission(user, "users.write")
+    target_user = first_or_404(
+        db.query(UserModel).filter(UserModel.user_id == user_id, UserModel.company_id == user.company_id),
+        "User not found",
+    )
+    if data.name is not None:
+        target_user.name = data.name.strip()
+    if data.role is not None:
+        role = data.role.strip().lower()
+        if role not in VALID_ROLES:
+            raise HTTPException(status_code=400, detail="Invalid role")
+        if target_user.user_id == user.user_id and role != target_user.role:
+            raise HTTPException(status_code=400, detail="You cannot change your own role")
+        target_user.role = role
+    db.commit()
+    db.refresh(target_user)
+    return serialize_user(target_user)
 
 
 def scoped_list(model, user: UserModel, db: Session) -> List[Dict[str, Any]]:
@@ -857,11 +991,13 @@ def scoped_list(model, user: UserModel, db: Session) -> List[Dict[str, Any]]:
 
 @app.get("/api/client-types")
 def get_client_types(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "clients.read")
     return scoped_list(ClientTypeModel, user, db)
 
 
 @app.post("/api/client-types")
 def create_client_type(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "clients.write")
     item = ClientTypeModel(type_id=prefixed_id("ct"), name=data["name"], description=data.get("description"), company_id=user.company_id)
     db.add(item)
     db.commit()
@@ -871,6 +1007,7 @@ def create_client_type(data: Dict[str, Any], user: UserModel = Depends(get_curre
 
 @app.delete("/api/client-types/{type_id}")
 def delete_client_type(type_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "clients.write")
     company_filter(db.query(ClientTypeModel), ClientTypeModel, user).filter(ClientTypeModel.type_id == type_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -878,17 +1015,20 @@ def delete_client_type(type_id: str, user: UserModel = Depends(get_current_user)
 
 @app.get("/api/clients")
 def get_clients(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "clients.read")
     return scoped_list(ClientModel, user, db)
 
 
 @app.get("/api/clients/{client_id}")
 def get_client(client_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "clients.read")
     item = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == client_id), "Client not found")
     return model_to_dict(item)
 
 
 @app.post("/api/clients")
 def create_client(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "clients.write")
     item = ClientModel(
         client_id=prefixed_id("cli"),
         name=data["name"],
@@ -908,6 +1048,7 @@ def create_client(data: Dict[str, Any], user: UserModel = Depends(get_current_us
 
 @app.put("/api/clients/{client_id}")
 def update_client(client_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "clients.write")
     item = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == client_id), "Client not found")
     for field in ["name", "email", "phone", "address", "tax_id", "type_id", "balance"]:
         if field in data:
@@ -919,6 +1060,7 @@ def update_client(client_id: str, data: Dict[str, Any], user: UserModel = Depend
 
 @app.delete("/api/clients/{client_id}")
 def delete_client(client_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "clients.write")
     company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == client_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -926,11 +1068,13 @@ def delete_client(client_id: str, user: UserModel = Depends(get_current_user), d
 
 @app.get("/api/supplier-types")
 def get_supplier_types(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "suppliers.read")
     return scoped_list(SupplierTypeModel, user, db)
 
 
 @app.post("/api/supplier-types")
 def create_supplier_type(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "suppliers.write")
     item = SupplierTypeModel(type_id=prefixed_id("st"), name=data["name"], description=data.get("description"), company_id=user.company_id)
     db.add(item)
     db.commit()
@@ -940,6 +1084,7 @@ def create_supplier_type(data: Dict[str, Any], user: UserModel = Depends(get_cur
 
 @app.delete("/api/supplier-types/{type_id}")
 def delete_supplier_type(type_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "suppliers.write")
     company_filter(db.query(SupplierTypeModel), SupplierTypeModel, user).filter(SupplierTypeModel.type_id == type_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -947,17 +1092,20 @@ def delete_supplier_type(type_id: str, user: UserModel = Depends(get_current_use
 
 @app.get("/api/suppliers")
 def get_suppliers(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "suppliers.read")
     return scoped_list(SupplierModel, user, db)
 
 
 @app.get("/api/suppliers/{supplier_id}")
 def get_supplier(supplier_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "suppliers.read")
     item = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == supplier_id), "Supplier not found")
     return model_to_dict(item)
 
 
 @app.post("/api/suppliers")
 def create_supplier(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "suppliers.write")
     item = SupplierModel(
         supplier_id=prefixed_id("sup"),
         name=data["name"],
@@ -977,6 +1125,7 @@ def create_supplier(data: Dict[str, Any], user: UserModel = Depends(get_current_
 
 @app.put("/api/suppliers/{supplier_id}")
 def update_supplier(supplier_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "suppliers.write")
     item = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == supplier_id), "Supplier not found")
     for field in ["name", "email", "phone", "address", "tax_id", "type_id", "balance"]:
         if field in data:
@@ -988,6 +1137,7 @@ def update_supplier(supplier_id: str, data: Dict[str, Any], user: UserModel = De
 
 @app.delete("/api/suppliers/{supplier_id}")
 def delete_supplier(supplier_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "suppliers.write")
     company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == supplier_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -995,11 +1145,13 @@ def delete_supplier(supplier_id: str, user: UserModel = Depends(get_current_user
 
 @app.get("/api/product-types")
 def get_product_types(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "products.read")
     return scoped_list(ProductTypeModel, user, db)
 
 
 @app.post("/api/product-types")
 def create_product_type(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "products.write")
     item = ProductTypeModel(type_id=prefixed_id("pt"), name=data["name"], description=data.get("description"), company_id=user.company_id)
     db.add(item)
     db.commit()
@@ -1009,6 +1161,7 @@ def create_product_type(data: Dict[str, Any], user: UserModel = Depends(get_curr
 
 @app.delete("/api/product-types/{type_id}")
 def delete_product_type(type_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "products.write")
     company_filter(db.query(ProductTypeModel), ProductTypeModel, user).filter(ProductTypeModel.type_id == type_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -1016,17 +1169,20 @@ def delete_product_type(type_id: str, user: UserModel = Depends(get_current_user
 
 @app.get("/api/products")
 def get_products(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "products.read")
     return scoped_list(ProductModel, user, db)
 
 
 @app.get("/api/products/{product_id}")
 def get_product(product_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "products.read")
     item = first_or_404(company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id), "Product not found")
     return model_to_dict(item)
 
 
 @app.post("/api/products")
 def create_product(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "products.write")
     item = ProductModel(
         product_id=prefixed_id("prod"),
         sku=data["sku"],
@@ -1045,6 +1201,7 @@ def create_product(data: Dict[str, Any], user: UserModel = Depends(get_current_u
 
 @app.put("/api/products/{product_id}")
 def update_product(product_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "products.write")
     item = first_or_404(company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id), "Product not found")
     for field in ["sku", "name", "description", "price", "cost", "type_id"]:
         if field in data:
@@ -1056,6 +1213,7 @@ def update_product(product_id: str, data: Dict[str, Any], user: UserModel = Depe
 
 @app.delete("/api/products/{product_id}")
 def delete_product(product_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "products.write")
     company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -1063,6 +1221,7 @@ def delete_product(product_id: str, user: UserModel = Depends(get_current_user),
 
 @app.post("/api/products/import-csv")
 async def import_products_csv(file: UploadFile = File(...), user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "products.write")
     content = (await file.read()).decode("utf-8")
     reader = csv.DictReader(io.StringIO(content))
     imported = 0
@@ -1085,11 +1244,13 @@ async def import_products_csv(file: UploadFile = File(...), user: UserModel = De
 
 @app.get("/api/warehouses")
 def get_warehouses(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "inventory.read")
     return scoped_list(WarehouseModel, user, db)
 
 
 @app.post("/api/warehouses")
 def create_warehouse(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "inventory.write")
     item = WarehouseModel(warehouse_id=prefixed_id("wh"), name=data["name"], address=data.get("address"), company_id=user.company_id)
     db.add(item)
     db.commit()
@@ -1099,6 +1260,7 @@ def create_warehouse(data: Dict[str, Any], user: UserModel = Depends(get_current
 
 @app.put("/api/warehouses/{warehouse_id}")
 def update_warehouse(warehouse_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "inventory.write")
     item = first_or_404(company_filter(db.query(WarehouseModel), WarehouseModel, user).filter(WarehouseModel.warehouse_id == warehouse_id), "Warehouse not found")
     for field in ["name", "address"]:
         if field in data:
@@ -1110,6 +1272,7 @@ def update_warehouse(warehouse_id: str, data: Dict[str, Any], user: UserModel = 
 
 @app.delete("/api/warehouses/{warehouse_id}")
 def delete_warehouse(warehouse_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "inventory.write")
     company_filter(db.query(WarehouseModel), WarehouseModel, user).filter(WarehouseModel.warehouse_id == warehouse_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -1117,6 +1280,7 @@ def delete_warehouse(warehouse_id: str, user: UserModel = Depends(get_current_us
 
 @app.get("/api/inventory")
 def get_inventory(warehouse_id: Optional[str] = None, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "inventory.read")
     query = company_filter(db.query(InventoryModel), InventoryModel, user)
     if warehouse_id:
         query = query.filter(InventoryModel.warehouse_id == warehouse_id)
@@ -1125,6 +1289,7 @@ def get_inventory(warehouse_id: Optional[str] = None, user: UserModel = Depends(
 
 @app.post("/api/inventory")
 def create_inventory(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "inventory.write")
     existing = company_filter(db.query(InventoryModel), InventoryModel, user).filter(
         InventoryModel.product_id == data["product_id"],
         InventoryModel.warehouse_id == data["warehouse_id"],
@@ -1153,6 +1318,7 @@ def create_inventory(data: Dict[str, Any], user: UserModel = Depends(get_current
 
 @app.put("/api/inventory/{inventory_id}")
 def update_inventory(inventory_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "inventory.write")
     item = first_or_404(company_filter(db.query(InventoryModel), InventoryModel, user).filter(InventoryModel.inventory_id == inventory_id), "Inventory not found")
     for field in ["product_id", "warehouse_id", "quantity", "min_stock"]:
         if field in data:
@@ -1170,6 +1336,7 @@ async def import_inventory_csv(
     user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, str]:
+    require_permission(user, "inventory.write")
     if not warehouse_id:
         default_warehouse = company_filter(db.query(WarehouseModel), WarehouseModel, user).first()
         warehouse_id = default_warehouse.warehouse_id if default_warehouse else None
@@ -1219,18 +1386,21 @@ async def import_inventory_csv(
 
 @app.get("/api/orders")
 def get_orders(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "sales.read")
     items = company_filter(db.query(OrderModel), OrderModel, user).order_by(OrderModel.created_at.desc()).all()
     return [model_to_dict(item) for item in items]
 
 
 @app.get("/api/orders/{order_id}")
 def get_order(order_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "sales.read")
     item = first_or_404(company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == order_id), "Order not found")
     return model_to_dict(item)
 
 
 @app.post("/api/orders")
 def create_order(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "sales.write")
     client = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == data["client_id"]), "Client not found")
     products_by_id = lookup_products(db, user, data.get("items", []))
     items, subtotal = build_line_items(data.get("items", []), products_by_id)
@@ -1257,6 +1427,7 @@ def create_order(data: Dict[str, Any], user: UserModel = Depends(get_current_use
 
 @app.put("/api/orders/{order_id}")
 def update_order(order_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "sales.write")
     item = first_or_404(company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == order_id), "Order not found")
     for field in ["status", "warehouse_id"]:
         if field in data:
@@ -1268,6 +1439,7 @@ def update_order(order_id: str, data: Dict[str, Any], user: UserModel = Depends(
 
 @app.delete("/api/orders/{order_id}")
 def delete_order(order_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "sales.write")
     company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == order_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -1275,18 +1447,21 @@ def delete_order(order_id: str, user: UserModel = Depends(get_current_user), db:
 
 @app.get("/api/invoices")
 def get_invoices(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "sales.read")
     items = company_filter(db.query(InvoiceModel), InvoiceModel, user).order_by(InvoiceModel.created_at.desc()).all()
     return [model_to_dict(item) for item in items]
 
 
 @app.get("/api/invoices/{invoice_id}")
 def get_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "sales.read")
     item = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
     return model_to_dict(item)
 
 
 @app.post("/api/invoices")
 def create_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "sales.write")
     client = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == data["client_id"]), "Client not found")
     products_by_id = lookup_products(db, user, data.get("items", []))
     items, subtotal = build_line_items(data.get("items", []), products_by_id)
@@ -1314,6 +1489,7 @@ def create_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_u
 
 @app.put("/api/invoices/{invoice_id}")
 def update_invoice(invoice_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "sales.write")
     item = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
     if "status" in data:
         item.status = data["status"]
@@ -1328,6 +1504,7 @@ def update_invoice(invoice_id: str, data: Dict[str, Any], user: UserModel = Depe
 
 @app.delete("/api/invoices/{invoice_id}")
 def delete_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "sales.write")
     company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -1335,12 +1512,14 @@ def delete_invoice(invoice_id: str, user: UserModel = Depends(get_current_user),
 
 @app.get("/api/purchase-orders")
 def get_purchase_orders(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "purchases.read")
     items = company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).order_by(PurchaseOrderModel.created_at.desc()).all()
     return [model_to_dict(item) for item in items]
 
 
 @app.post("/api/purchase-orders")
 def create_purchase_order(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "purchases.write")
     supplier = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == data["supplier_id"]), "Supplier not found")
     products_by_id = lookup_products(db, user, data.get("items", []))
     items, subtotal = build_line_items(data.get("items", []), products_by_id)
@@ -1367,6 +1546,7 @@ def create_purchase_order(data: Dict[str, Any], user: UserModel = Depends(get_cu
 
 @app.put("/api/purchase-orders/{po_id}")
 def update_purchase_order(po_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "purchases.write")
     item = first_or_404(company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).filter(PurchaseOrderModel.po_id == po_id), "Purchase order not found")
     for field in ["status", "warehouse_id"]:
         if field in data:
@@ -1378,6 +1558,7 @@ def update_purchase_order(po_id: str, data: Dict[str, Any], user: UserModel = De
 
 @app.delete("/api/purchase-orders/{po_id}")
 def delete_purchase_order(po_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "purchases.write")
     company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).filter(PurchaseOrderModel.po_id == po_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -1385,12 +1566,14 @@ def delete_purchase_order(po_id: str, user: UserModel = Depends(get_current_user
 
 @app.get("/api/purchase-invoices")
 def get_purchase_invoices(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "purchases.read")
     items = company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).order_by(PurchaseInvoiceModel.created_at.desc()).all()
     return [model_to_dict(item) for item in items]
 
 
 @app.post("/api/purchase-invoices")
 def create_purchase_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "purchases.write")
     supplier = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == data["supplier_id"]), "Supplier not found")
     products_by_id = lookup_products(db, user, data.get("items", []))
     items, subtotal = build_line_items(data.get("items", []), products_by_id)
@@ -1418,6 +1601,7 @@ def create_purchase_invoice(data: Dict[str, Any], user: UserModel = Depends(get_
 
 @app.put("/api/purchase-invoices/{pinv_id}")
 def update_purchase_invoice(pinv_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "purchases.write")
     item = first_or_404(company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.pinv_id == pinv_id), "Purchase invoice not found")
     if "status" in data:
         item.status = data["status"]
@@ -1432,6 +1616,7 @@ def update_purchase_invoice(pinv_id: str, data: Dict[str, Any], user: UserModel 
 
 @app.delete("/api/purchase-invoices/{pinv_id}")
 def delete_purchase_invoice(pinv_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "purchases.write")
     company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.pinv_id == pinv_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -1439,14 +1624,27 @@ def delete_purchase_invoice(pinv_id: str, user: UserModel = Depends(get_current_
 
 @app.get("/api/reports/dashboard")
 def get_dashboard_stats(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "dashboard.read")
     company_id = user.company_id
-    clients_count = db.query(ClientModel).filter(ClientModel.company_id == company_id).count()
-    suppliers_count = db.query(SupplierModel).filter(SupplierModel.company_id == company_id).count()
-    products_count = db.query(ProductModel).filter(ProductModel.company_id == company_id).count()
-    orders = db.query(OrderModel).filter(OrderModel.company_id == company_id).order_by(OrderModel.created_at.desc()).all()
-    invoices = db.query(InvoiceModel).filter(InvoiceModel.company_id == company_id).order_by(InvoiceModel.created_at.desc()).all()
-    purchase_invoices = db.query(PurchaseInvoiceModel).filter(PurchaseInvoiceModel.company_id == company_id).all()
-    inventory = db.query(InventoryModel).filter(InventoryModel.company_id == company_id).all()
+    clients_count = db.query(ClientModel).filter(ClientModel.company_id == company_id).count() if user_has_permission(user, "clients.read") else 0
+    suppliers_count = db.query(SupplierModel).filter(SupplierModel.company_id == company_id).count() if user_has_permission(user, "suppliers.read") else 0
+    products_count = db.query(ProductModel).filter(ProductModel.company_id == company_id).count() if user_has_permission(user, "products.read") else 0
+    orders = (
+        db.query(OrderModel).filter(OrderModel.company_id == company_id).order_by(OrderModel.created_at.desc()).all()
+        if user_has_permission(user, "sales.read")
+        else []
+    )
+    invoices = (
+        db.query(InvoiceModel).filter(InvoiceModel.company_id == company_id).order_by(InvoiceModel.created_at.desc()).all()
+        if user_has_permission(user, "sales.read")
+        else []
+    )
+    purchase_invoices = (
+        db.query(PurchaseInvoiceModel).filter(PurchaseInvoiceModel.company_id == company_id).all()
+        if user_has_permission(user, "purchases.read")
+        else []
+    )
+    inventory = db.query(InventoryModel).filter(InventoryModel.company_id == company_id).all() if user_has_permission(user, "inventory.read") else []
 
     return {
         "clients_count": clients_count,
@@ -1464,6 +1662,7 @@ def get_dashboard_stats(user: UserModel = Depends(get_current_user), db: Session
 
 @app.get("/api/reports/export/{report_type}")
 def export_report(report_type: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> StreamingResponse:
+    require_permission(user, "reports.read")
     table_map = {
         "clients": ClientModel,
         "suppliers": SupplierModel,
@@ -1497,6 +1696,7 @@ def export_report(report_type: str, user: UserModel = Depends(get_current_user),
 
 @app.get("/api/ai/chat-history")
 def get_chat_history(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "ai.read")
     items = (
         db.query(ChatMessageModel)
         .filter(ChatMessageModel.user_id == user.user_id, ChatMessageModel.company_id == user.company_id)
@@ -1508,6 +1708,7 @@ def get_chat_history(user: UserModel = Depends(get_current_user), db: Session = 
 
 @app.post("/api/ai/chat")
 async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "ai.read")
     user_message = data.get("message", "").strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="Message is required")
@@ -1566,11 +1767,19 @@ async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_curre
         db.commit()
         return {"response": direct_response, "message_id": assistant_msg.message_id}
 
-    clients = company_filter(db.query(ClientModel), ClientModel, user).limit(20).all()
-    suppliers = company_filter(db.query(SupplierModel), SupplierModel, user).limit(20).all()
-    products = company_filter(db.query(ProductModel), ProductModel, user).limit(20).all()
-    invoices = company_filter(db.query(InvoiceModel), InvoiceModel, user).order_by(InvoiceModel.created_at.desc()).limit(10).all()
-    orders = company_filter(db.query(OrderModel), OrderModel, user).order_by(OrderModel.created_at.desc()).limit(10).all()
+    clients = company_filter(db.query(ClientModel), ClientModel, user).limit(20).all() if user_has_permission(user, "clients.read") else []
+    suppliers = company_filter(db.query(SupplierModel), SupplierModel, user).limit(20).all() if user_has_permission(user, "suppliers.read") else []
+    products = company_filter(db.query(ProductModel), ProductModel, user).limit(20).all() if user_has_permission(user, "products.read") else []
+    invoices = (
+        company_filter(db.query(InvoiceModel), InvoiceModel, user).order_by(InvoiceModel.created_at.desc()).limit(10).all()
+        if user_has_permission(user, "sales.read")
+        else []
+    )
+    orders = (
+        company_filter(db.query(OrderModel), OrderModel, user).order_by(OrderModel.created_at.desc()).limit(10).all()
+        if user_has_permission(user, "sales.read")
+        else []
+    )
 
     context = f"""
 Eres un asistente de IA para un ERP. Responde siempre en espanol y de forma concisa.
@@ -1625,6 +1834,7 @@ PEDIDOS:
 
 @app.delete("/api/ai/chat-history")
 def clear_chat_history(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    require_permission(user, "ai.read")
     db.query(ChatMessageModel).filter(ChatMessageModel.user_id == user.user_id, ChatMessageModel.company_id == user.company_id).delete()
     db.commit()
     return {"message": "Chat history cleared"}

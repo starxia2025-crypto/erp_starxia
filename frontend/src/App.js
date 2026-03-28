@@ -4,6 +4,7 @@ import { useEffect, useState, createContext, useContext, useCallback } from "rea
 import axios from "axios";
 import { Toaster } from "@/components/ui/sonner";
 import { API_BASE } from "@/lib/api";
+import { hasPermission } from "@/lib/permissions";
 
 // Pages
 import Landing from "@/pages/Landing";
@@ -69,7 +70,7 @@ export const AuthProvider = ({ children }) => {
 };
 
 // Protected Route
-const ProtectedRoute = ({ children }) => {
+const ProtectedRoute = ({ children, permission }) => {
   const { user, loading } = useAuth();
 
   if (loading) {
@@ -84,6 +85,10 @@ const ProtectedRoute = ({ children }) => {
     return <Navigate to="/" replace />;
   }
 
+  if (permission && !hasPermission(user, permission)) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
   return children;
 };
 
@@ -92,22 +97,22 @@ const AppRouter = () => {
   return (
     <Routes>
       <Route path="/" element={<Landing />} />
-      <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-      <Route path="/clients" element={<ProtectedRoute><Clients /></ProtectedRoute>} />
-      <Route path="/client-types" element={<ProtectedRoute><ClientTypes /></ProtectedRoute>} />
-      <Route path="/suppliers" element={<ProtectedRoute><Suppliers /></ProtectedRoute>} />
-      <Route path="/supplier-types" element={<ProtectedRoute><SupplierTypes /></ProtectedRoute>} />
-      <Route path="/products" element={<ProtectedRoute><Products /></ProtectedRoute>} />
-      <Route path="/product-types" element={<ProtectedRoute><ProductTypes /></ProtectedRoute>} />
-      <Route path="/warehouses" element={<ProtectedRoute><Warehouses /></ProtectedRoute>} />
-      <Route path="/inventory" element={<ProtectedRoute><Inventory /></ProtectedRoute>} />
-      <Route path="/orders" element={<ProtectedRoute><Orders /></ProtectedRoute>} />
-      <Route path="/invoices" element={<ProtectedRoute><Invoices /></ProtectedRoute>} />
-      <Route path="/purchase-orders" element={<ProtectedRoute><PurchaseOrders /></ProtectedRoute>} />
-      <Route path="/purchase-invoices" element={<ProtectedRoute><PurchaseInvoices /></ProtectedRoute>} />
-      <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
-      <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
-      <Route path="/ai-assistant" element={<ProtectedRoute><AIAssistant /></ProtectedRoute>} />
+      <Route path="/dashboard" element={<ProtectedRoute permission="dashboard.read"><Dashboard /></ProtectedRoute>} />
+      <Route path="/clients" element={<ProtectedRoute permission="clients.read"><Clients /></ProtectedRoute>} />
+      <Route path="/client-types" element={<ProtectedRoute permission="clients.read"><ClientTypes /></ProtectedRoute>} />
+      <Route path="/suppliers" element={<ProtectedRoute permission="suppliers.read"><Suppliers /></ProtectedRoute>} />
+      <Route path="/supplier-types" element={<ProtectedRoute permission="suppliers.read"><SupplierTypes /></ProtectedRoute>} />
+      <Route path="/products" element={<ProtectedRoute permission="products.read"><Products /></ProtectedRoute>} />
+      <Route path="/product-types" element={<ProtectedRoute permission="products.read"><ProductTypes /></ProtectedRoute>} />
+      <Route path="/warehouses" element={<ProtectedRoute permission="inventory.read"><Warehouses /></ProtectedRoute>} />
+      <Route path="/inventory" element={<ProtectedRoute permission="inventory.read"><Inventory /></ProtectedRoute>} />
+      <Route path="/orders" element={<ProtectedRoute permission="sales.read"><Orders /></ProtectedRoute>} />
+      <Route path="/invoices" element={<ProtectedRoute permission="sales.read"><Invoices /></ProtectedRoute>} />
+      <Route path="/purchase-orders" element={<ProtectedRoute permission="purchases.read"><PurchaseOrders /></ProtectedRoute>} />
+      <Route path="/purchase-invoices" element={<ProtectedRoute permission="purchases.read"><PurchaseInvoices /></ProtectedRoute>} />
+      <Route path="/reports" element={<ProtectedRoute permission="reports.read"><Reports /></ProtectedRoute>} />
+      <Route path="/settings" element={<ProtectedRoute permission="settings.read"><Settings /></ProtectedRoute>} />
+      <Route path="/ai-assistant" element={<ProtectedRoute permission="ai.read"><AIAssistant /></ProtectedRoute>} />
     </Routes>
   );
 };
