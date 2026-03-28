@@ -1,6 +1,6 @@
 import "@/App.css";
-import { BrowserRouter, Routes, Route, useLocation, useNavigate } from "react-router-dom";
-import { useEffect, useState, useRef, createContext, useContext, useCallback } from "react";
+import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import { useEffect, useState, createContext, useContext, useCallback } from "react";
 import axios from "axios";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -36,13 +36,6 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   const checkAuth = useCallback(async () => {
-    // CRITICAL: If returning from OAuth callback, skip the /me check.
-    // AuthCallback will exchange the session_id and establish the session first.
-    if (window.location.hash?.includes('session_id=')) {
-      setLoading(false);
-      return;
-    }
-    
     try {
       const response = await axios.get(`${API}/auth/me`, {
         withCredentials: true
@@ -75,61 +68,16 @@ export const AuthProvider = ({ children }) => {
   );
 };
 
-// Auth Callback Component
-const AuthCallback = () => {
-  const navigate = useNavigate();
-  const { setUser } = useAuth();
-  const hasProcessed = useRef(false);
-
-  useEffect(() => {
-    if (hasProcessed.current) return;
-    hasProcessed.current = true;
-
-    const processAuth = async () => {
-      const hash = window.location.hash;
-      const sessionIdMatch = hash.match(/session_id=([^&]+)/);
-      
-      if (sessionIdMatch) {
-        const sessionId = sessionIdMatch[1];
-        try {
-          const response = await axios.get(`${API}/auth/session?session_id=${sessionId}`, {
-            withCredentials: true
-          });
-          setUser(response.data);
-          navigate('/dashboard', { replace: true, state: { user: response.data } });
-        } catch (error) {
-          console.error("Auth error:", error);
-          navigate('/', { replace: true });
-        }
-      } else {
-        navigate('/', { replace: true });
-      }
-    };
-
-    processAuth();
-  }, [navigate, setUser]);
-
-  return (
-    <div className="min-h-screen bg-background flex items-center justify-center">
-      <div className="text-center">
-        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-        <p className="text-muted-foreground">Autenticando...</p>
-      </div>
-    </div>
-  );
-};
-
 // Protected Route
 const ProtectedRoute = ({ children }) => {
   const { user, loading } = useAuth();
   const navigate = useNavigate();
-  const location = useLocation();
 
   useEffect(() => {
-    if (!loading && !user && !location.state?.user) {
+    if (!loading && !user) {
       navigate('/', { replace: true });
     }
-  }, [user, loading, navigate, location]);
+  }, [user, loading, navigate]);
 
   if (loading) {
     return (
@@ -139,7 +87,7 @@ const ProtectedRoute = ({ children }) => {
     );
   }
 
-  if (!user && !location.state?.user) {
+  if (!user) {
     return null;
   }
 
@@ -148,13 +96,6 @@ const ProtectedRoute = ({ children }) => {
 
 // App Router
 const AppRouter = () => {
-  const location = useLocation();
-
-  // Check URL fragment for session_id synchronously during render
-  if (location.hash?.includes('session_id=')) {
-    return <AuthCallback />;
-  }
-
   return (
     <Routes>
       <Route path="/" element={<Landing />} />

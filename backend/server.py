@@ -1,1214 +1,1254 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, UploadFile, File
-from fastapi.responses import RedirectResponse, StreamingResponse
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any
-import uuid
-from datetime import datetime, timezone, timedelta
-import httpx
-import io
 import csv
+import io
+import logging
+import os
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+ 
 import pandas as pd
+from dotenv import load_dotenv
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import StreamingResponse
+from jose import JWTError, jwt
+from openai import AsyncOpenAI
+from passlib.context import CryptContext
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy.orm import Session, declarative_base, mapped_column, sessionmaker
+from starlette.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+load_dotenv(ROOT_DIR / ".env")
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+DATABASE_URL = os.environ["DATABASE_URL"]
+JWT_SECRET = os.environ["JWT_SECRET"]
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
+    if origin.strip()
+]
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
+COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax").lower()
+ACCESS_TOKEN_EXPIRE_DAYS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_DAYS", "7"))
 
-# Emergent LLM Key
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True, connect_args=connect_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
+Base = declarative_base()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-app = FastAPI()
-api_router = APIRouter(prefix="/api")
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ==================== MODELS ====================
 
-class UserBase(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    user_id: str
-    email: str
+class TimestampMixin:
+    created_at = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class UpdatedTimestampMixin:
+    updated_at = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class CompanyModel(Base, TimestampMixin):
+    __tablename__ = "companies"
+
+    company_id = mapped_column(String(32), primary_key=True)
+    name = mapped_column(String(255), nullable=False)
+    tax_id = mapped_column(String(64))
+    address = mapped_column(Text)
+    phone = mapped_column(String(64))
+    email = mapped_column(String(255))
+
+
+class UserModel(Base, TimestampMixin):
+    __tablename__ = "users"
+
+    user_id = mapped_column(String(32), primary_key=True)
+    email = mapped_column(String(255), unique=True, nullable=False, index=True)
+    password_hash = mapped_column(String(255), nullable=False)
+    name = mapped_column(String(255), nullable=False)
+    picture = mapped_column(Text)
+    role = mapped_column(String(32), default="user", nullable=False)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class ClientTypeModel(Base):
+    __tablename__ = "client_types"
+
+    type_id = mapped_column(String(32), primary_key=True)
+    name = mapped_column(String(255), nullable=False)
+    description = mapped_column(Text)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class ClientModel(Base, TimestampMixin):
+    __tablename__ = "clients"
+
+    client_id = mapped_column(String(32), primary_key=True)
+    name = mapped_column(String(255), nullable=False)
+    email = mapped_column(String(255))
+    phone = mapped_column(String(64))
+    address = mapped_column(Text)
+    tax_id = mapped_column(String(64))
+    type_id = mapped_column(String(32))
+    company_id = mapped_column(String(32), nullable=False, index=True)
+    balance = mapped_column(Float, default=0.0, nullable=False)
+
+
+class SupplierTypeModel(Base):
+    __tablename__ = "supplier_types"
+
+    type_id = mapped_column(String(32), primary_key=True)
+    name = mapped_column(String(255), nullable=False)
+    description = mapped_column(Text)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class SupplierModel(Base, TimestampMixin):
+    __tablename__ = "suppliers"
+
+    supplier_id = mapped_column(String(32), primary_key=True)
+    name = mapped_column(String(255), nullable=False)
+    email = mapped_column(String(255))
+    phone = mapped_column(String(64))
+    address = mapped_column(Text)
+    tax_id = mapped_column(String(64))
+    type_id = mapped_column(String(32))
+    company_id = mapped_column(String(32), nullable=False, index=True)
+    balance = mapped_column(Float, default=0.0, nullable=False)
+
+
+class ProductTypeModel(Base):
+    __tablename__ = "product_types"
+
+    type_id = mapped_column(String(32), primary_key=True)
+    name = mapped_column(String(255), nullable=False)
+    description = mapped_column(Text)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class ProductModel(Base, TimestampMixin):
+    __tablename__ = "products"
+
+    product_id = mapped_column(String(32), primary_key=True)
+    sku = mapped_column(String(128), nullable=False)
+    name = mapped_column(String(255), nullable=False)
+    description = mapped_column(Text)
+    price = mapped_column(Float, default=0.0, nullable=False)
+    cost = mapped_column(Float, default=0.0, nullable=False)
+    type_id = mapped_column(String(32))
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class WarehouseModel(Base, TimestampMixin):
+    __tablename__ = "warehouses"
+
+    warehouse_id = mapped_column(String(32), primary_key=True)
+    name = mapped_column(String(255), nullable=False)
+    address = mapped_column(Text)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class InventoryModel(Base, UpdatedTimestampMixin):
+    __tablename__ = "inventory"
+    __table_args__ = (UniqueConstraint("company_id", "product_id", "warehouse_id", name="uq_inventory_scope"),)
+
+    inventory_id = mapped_column(String(32), primary_key=True)
+    product_id = mapped_column(String(32), nullable=False, index=True)
+    warehouse_id = mapped_column(String(32), nullable=False, index=True)
+    quantity = mapped_column(Integer, default=0, nullable=False)
+    min_stock = mapped_column(Integer, default=0, nullable=False)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class OrderModel(Base, TimestampMixin):
+    __tablename__ = "orders"
+
+    order_id = mapped_column(String(32), primary_key=True)
+    order_number = mapped_column(String(64), nullable=False)
+    client_id = mapped_column(String(32), nullable=False)
+    client_name = mapped_column(String(255), nullable=False)
+    items = mapped_column(JSON, default=list, nullable=False)
+    subtotal = mapped_column(Float, default=0.0, nullable=False)
+    tax = mapped_column(Float, default=0.0, nullable=False)
+    total = mapped_column(Float, default=0.0, nullable=False)
+    status = mapped_column(String(32), default="pending", nullable=False)
+    warehouse_id = mapped_column(String(32))
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class InvoiceModel(Base, TimestampMixin):
+    __tablename__ = "invoices"
+
+    invoice_id = mapped_column(String(32), primary_key=True)
+    invoice_number = mapped_column(String(64), nullable=False)
+    client_id = mapped_column(String(32), nullable=False)
+    client_name = mapped_column(String(255), nullable=False)
+    order_id = mapped_column(String(32))
+    items = mapped_column(JSON, default=list, nullable=False)
+    subtotal = mapped_column(Float, default=0.0, nullable=False)
+    tax = mapped_column(Float, default=0.0, nullable=False)
+    total = mapped_column(Float, default=0.0, nullable=False)
+    status = mapped_column(String(32), default="pending", nullable=False)
+    due_date = mapped_column(DateTime(timezone=True))
+    paid_date = mapped_column(DateTime(timezone=True))
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class PurchaseOrderModel(Base, TimestampMixin):
+    __tablename__ = "purchase_orders"
+
+    po_id = mapped_column(String(32), primary_key=True)
+    po_number = mapped_column(String(64), nullable=False)
+    supplier_id = mapped_column(String(32), nullable=False)
+    supplier_name = mapped_column(String(255), nullable=False)
+    items = mapped_column(JSON, default=list, nullable=False)
+    subtotal = mapped_column(Float, default=0.0, nullable=False)
+    tax = mapped_column(Float, default=0.0, nullable=False)
+    total = mapped_column(Float, default=0.0, nullable=False)
+    status = mapped_column(String(32), default="pending", nullable=False)
+    warehouse_id = mapped_column(String(32))
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class PurchaseInvoiceModel(Base, TimestampMixin):
+    __tablename__ = "purchase_invoices"
+
+    pinv_id = mapped_column(String(32), primary_key=True)
+    invoice_number = mapped_column(String(64), nullable=False)
+    supplier_id = mapped_column(String(32), nullable=False)
+    supplier_name = mapped_column(String(255), nullable=False)
+    po_id = mapped_column(String(32))
+    items = mapped_column(JSON, default=list, nullable=False)
+    subtotal = mapped_column(Float, default=0.0, nullable=False)
+    tax = mapped_column(Float, default=0.0, nullable=False)
+    total = mapped_column(Float, default=0.0, nullable=False)
+    status = mapped_column(String(32), default="pending", nullable=False)
+    due_date = mapped_column(DateTime(timezone=True))
+    paid_date = mapped_column(DateTime(timezone=True))
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class ChatMessageModel(Base, TimestampMixin):
+    __tablename__ = "chat_messages"
+
+    message_id = mapped_column(String(32), primary_key=True)
+    user_id = mapped_column(String(32), nullable=False, index=True)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+    role = mapped_column(String(32), nullable=False)
+    content = mapped_column(Text, nullable=False)
+
+
+class RegisterInput(BaseModel):
     name: str
-    picture: Optional[str] = None
-    role: str = "user"
-    company_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    email: EmailStr
+    password: str = Field(min_length=8)
+    company_name: str
 
-class Company(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    company_id: str = Field(default_factory=lambda: f"comp_{uuid.uuid4().hex[:12]}")
-    name: str
-    tax_id: Optional[str] = None
-    address: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class ClientType(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    type_id: str = Field(default_factory=lambda: f"ct_{uuid.uuid4().hex[:12]}")
-    name: str
-    description: Optional[str] = None
-    company_id: str
+class LoginInput(BaseModel):
+    email: EmailStr
+    password: str
 
-class Client(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    client_id: str = Field(default_factory=lambda: f"cli_{uuid.uuid4().hex[:12]}")
-    name: str
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
-    tax_id: Optional[str] = None
-    type_id: Optional[str] = None
-    company_id: str
-    balance: float = 0.0
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class SupplierType(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    type_id: str = Field(default_factory=lambda: f"st_{uuid.uuid4().hex[:12]}")
-    name: str
-    description: Optional[str] = None
-    company_id: str
+app = FastAPI(title="Starxia ERP API")
 
-class Supplier(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    supplier_id: str = Field(default_factory=lambda: f"sup_{uuid.uuid4().hex[:12]}")
-    name: str
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[str] = None
-    tax_id: Optional[str] = None
-    type_id: Optional[str] = None
-    company_id: str
-    balance: float = 0.0
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class ProductType(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    type_id: str = Field(default_factory=lambda: f"pt_{uuid.uuid4().hex[:12]}")
-    name: str
-    description: Optional[str] = None
-    company_id: str
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-class Product(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    product_id: str = Field(default_factory=lambda: f"prod_{uuid.uuid4().hex[:12]}")
-    sku: str
-    name: str
-    description: Optional[str] = None
-    price: float = 0.0
-    cost: float = 0.0
-    type_id: Optional[str] = None
-    company_id: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class Warehouse(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    warehouse_id: str = Field(default_factory=lambda: f"wh_{uuid.uuid4().hex[:12]}")
-    name: str
-    address: Optional[str] = None
-    company_id: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+def prefixed_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
-class Inventory(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    inventory_id: str = Field(default_factory=lambda: f"inv_{uuid.uuid4().hex[:12]}")
-    product_id: str
-    warehouse_id: str
-    quantity: int = 0
-    min_stock: int = 0
-    company_id: str
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class OrderItem(BaseModel):
-    product_id: str
-    product_name: str
-    quantity: int
-    price: float
-    total: float
+def serialize_datetime(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
-class Order(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    order_id: str = Field(default_factory=lambda: f"ord_{uuid.uuid4().hex[:12]}")
-    order_number: str
-    client_id: str
-    client_name: str
-    items: List[OrderItem] = []
-    subtotal: float = 0.0
-    tax: float = 0.0
-    total: float = 0.0
-    status: str = "pending"  # pending, confirmed, shipped, delivered, cancelled
-    warehouse_id: Optional[str] = None
-    company_id: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class Invoice(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    invoice_id: str = Field(default_factory=lambda: f"inv_{uuid.uuid4().hex[:12]}")
-    invoice_number: str
-    client_id: str
-    client_name: str
-    order_id: Optional[str] = None
-    items: List[OrderItem] = []
-    subtotal: float = 0.0
-    tax: float = 0.0
-    total: float = 0.0
-    status: str = "pending"  # pending, paid, overdue, cancelled
-    due_date: Optional[datetime] = None
-    paid_date: Optional[datetime] = None
-    company_id: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+def model_to_dict(instance: Any, exclude: Optional[set[str]] = None) -> Dict[str, Any]:
+    exclude = exclude or set()
+    data: Dict[str, Any] = {}
+    for column in instance.__table__.columns:
+        if column.name in exclude:
+            continue
+        value = getattr(instance, column.name)
+        data[column.name] = serialize_datetime(value) if isinstance(value, datetime) else value
+    return data
 
-class PurchaseOrder(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    po_id: str = Field(default_factory=lambda: f"po_{uuid.uuid4().hex[:12]}")
-    po_number: str
-    supplier_id: str
-    supplier_name: str
-    items: List[OrderItem] = []
-    subtotal: float = 0.0
-    tax: float = 0.0
-    total: float = 0.0
-    status: str = "pending"  # pending, confirmed, received, cancelled
-    warehouse_id: Optional[str] = None
-    company_id: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class PurchaseInvoice(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    pinv_id: str = Field(default_factory=lambda: f"pinv_{uuid.uuid4().hex[:12]}")
-    invoice_number: str
-    supplier_id: str
-    supplier_name: str
-    po_id: Optional[str] = None
-    items: List[OrderItem] = []
-    subtotal: float = 0.0
-    tax: float = 0.0
-    total: float = 0.0
-    status: str = "pending"  # pending, paid, overdue
-    due_date: Optional[datetime] = None
-    paid_date: Optional[datetime] = None
-    company_id: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
-class ChatMessage(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    message_id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4().hex[:12]}")
-    user_id: str
-    company_id: str
-    role: str  # user or assistant
-    content: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-# ==================== AUTH ====================
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
 
-async def get_current_user(request: Request) -> dict:
-    session_token = request.cookies.get("session_token")
-    if not session_token:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            session_token = auth_header.split(" ")[1]
-    
-    if not session_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    session = await db.user_sessions.find_one({"session_token": session_token}, {"_id": 0})
-    if not session:
-        raise HTTPException(status_code=401, detail="Invalid session")
-    
-    expires_at = session.get("expires_at")
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=401, detail="Session expired")
-    
-    user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    
-    return user
 
-@api_router.get("/auth/session")
-async def exchange_session(session_id: str, response: Response):
-    async with httpx.AsyncClient() as client_http:
-        res = await client_http.get(
-            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-            headers={"X-Session-ID": session_id}
-        )
-        if res.status_code != 200:
-            raise HTTPException(status_code=401, detail="Invalid session")
-        
-        data = res.json()
-    
-    user_id = f"user_{uuid.uuid4().hex[:12]}"
-    existing_user = await db.users.find_one({"email": data["email"]}, {"_id": 0})
-    
-    if existing_user:
-        user_id = existing_user["user_id"]
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$set": {"name": data["name"], "picture": data.get("picture")}}
-        )
-    else:
-        # Create default company for new user
-        company_id = f"comp_{uuid.uuid4().hex[:12]}"
-        company = {
-            "company_id": company_id,
-            "name": f"Empresa de {data['name']}",
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        await db.companies.insert_one(company)
-        
-        # Create user with company
-        user = {
-            "user_id": user_id,
-            "email": data["email"],
-            "name": data["name"],
-            "picture": data.get("picture"),
-            "role": "admin",
-            "company_id": company_id,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        await db.users.insert_one(user)
-        
-        # Create default warehouse
-        warehouse = {
-            "warehouse_id": f"wh_{uuid.uuid4().hex[:12]}",
-            "name": "Almacén Principal",
-            "company_id": company_id,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        await db.warehouses.insert_one(warehouse)
-    
-    session_token = data.get("session_token", f"sess_{uuid.uuid4().hex}")
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-    
-    await db.user_sessions.insert_one({
-        "user_id": user_id,
-        "session_token": session_token,
-        "expires_at": expires_at.isoformat(),
-        "created_at": datetime.now(timezone.utc).isoformat()
-    })
-    
+def verify_password(password: str, password_hash: str) -> bool:
+    return pwd_context.verify(password, password_hash)
+
+
+def create_access_token(user: UserModel) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+    payload = {"sub": user.user_id, "company_id": user.company_id, "exp": expires_at}
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def set_auth_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         key="session_token",
-        value=session_token,
+        value=token,
         httponly=True,
-        secure=True,
-        samesite="none",
-        max_age=7*24*60*60,
-        path="/"
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        path="/",
     )
-    
-    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+
+
+def get_token_from_request(request: Request, session_token: Optional[str]) -> str:
+    token = session_token or request.cookies.get("session_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return token
+
+
+def get_current_user(
+    request: Request,
+    db: Session = Depends(get_db),
+    session_token: Optional[str] = Cookie(default=None),
+) -> UserModel:
+    token = get_token_from_request(request, session_token)
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid session") from exc
+
+    user = db.query(UserModel).filter(UserModel.user_id == payload.get("sub")).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
     return user
 
-@api_router.get("/auth/me")
-async def get_me(request: Request):
-    user = await get_current_user(request)
-    return user
 
-@api_router.post("/auth/logout")
-async def logout(request: Request, response: Response):
-    session_token = request.cookies.get("session_token")
-    if session_token:
-        await db.user_sessions.delete_one({"session_token": session_token})
+def ensure_company_scope(user: UserModel, company_id: str) -> None:
+    if user.company_id != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+
+def generate_sequence(prefix: str, table: Any, company_id: str, db: Session) -> str:
+    count = db.query(table).filter(table.company_id == company_id).count()
+    return f"{prefix}-{str(count + 1).zfill(6)}"
+
+
+def company_filter(query, model, user: UserModel):
+    return query.filter(model.company_id == user.company_id)
+
+
+def first_or_404(query, detail: str):
+    instance = query.first()
+    if not instance:
+        raise HTTPException(status_code=404, detail=detail)
+    return instance
+
+
+def build_line_items(raw_items: List[Dict[str, Any]], products_by_id: Dict[str, ProductModel]) -> tuple[List[Dict[str, Any]], float]:
+    items: List[Dict[str, Any]] = []
+    subtotal = 0.0
+    for raw_item in raw_items:
+        product = products_by_id.get(raw_item["product_id"])
+        if not product:
+            continue
+        quantity = int(raw_item.get("quantity", 0))
+        price = float(raw_item.get("price", product.price or 0))
+        total = quantity * price
+        items.append(
+            {
+                "product_id": product.product_id,
+                "product_name": product.name,
+                "quantity": quantity,
+                "price": price,
+                "total": total,
+            }
+        )
+        subtotal += total
+    return items, subtotal
+
+
+def lookup_products(db: Session, user: UserModel, raw_items: List[Dict[str, Any]]) -> Dict[str, ProductModel]:
+    product_ids = [item["product_id"] for item in raw_items if item.get("product_id")]
+    if not product_ids:
+        return {}
+    products = company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id.in_(product_ids)).all()
+    return {product.product_id: product for product in products}
+
+
+async def generate_ai_response(context: str, user_message: str) -> str:
+    if not openai_client:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    response = await openai_client.responses.create(
+        model=OPENAI_MODEL,
+        input=[
+            {"role": "system", "content": [{"type": "input_text", "text": context}]},
+            {"role": "user", "content": [{"type": "input_text", "text": user_message}]},
+        ],
+    )
+    return response.output_text
+
+
+@app.on_event("startup")
+def startup() -> None:
+    Base.metadata.create_all(bind=engine)
+
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/register")
+def register(data: RegisterInput, response: Response, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    existing = db.query(UserModel).filter(UserModel.email == data.email.lower()).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    company = CompanyModel(company_id=prefixed_id("comp"), name=data.company_name.strip())
+    user = UserModel(
+        user_id=prefixed_id("user"),
+        email=data.email.lower(),
+        password_hash=hash_password(data.password),
+        name=data.name.strip(),
+        role="admin",
+        company_id=company.company_id,
+    )
+    warehouse = WarehouseModel(
+        warehouse_id=prefixed_id("wh"),
+        name="Almacen Principal",
+        company_id=company.company_id,
+    )
+
+    db.add(company)
+    db.add(user)
+    db.add(warehouse)
+    db.commit()
+    db.refresh(user)
+
+    set_auth_cookie(response, create_access_token(user))
+    return model_to_dict(user, exclude={"password_hash"})
+
+
+@app.post("/api/auth/login")
+def login(data: LoginInput, response: Response, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    user = db.query(UserModel).filter(UserModel.email == data.email.lower()).first()
+    if not user or not verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    set_auth_cookie(response, create_access_token(user))
+    return model_to_dict(user, exclude={"password_hash"})
+
+
+@app.get("/api/auth/me")
+def get_me(user: UserModel = Depends(get_current_user)) -> Dict[str, Any]:
+    return model_to_dict(user, exclude={"password_hash"})
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response) -> Dict[str, str]:
     response.delete_cookie("session_token", path="/")
     return {"message": "Logged out"}
 
-# ==================== COMPANIES ====================
 
-@api_router.get("/companies")
-async def get_companies(request: Request):
-    user = await get_current_user(request)
-    companies = await db.companies.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    return companies
+@app.get("/api/companies")
+def get_companies(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    companies = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).all()
+    return [model_to_dict(company) for company in companies]
 
-@api_router.put("/companies/{company_id}")
-async def update_company(company_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    if user["company_id"] != company_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    await db.companies.update_one({"company_id": company_id}, {"$set": data})
-    company = await db.companies.find_one({"company_id": company_id}, {"_id": 0})
-    return company
 
-# ==================== USERS ====================
+@app.put("/api/companies/{company_id}")
+def update_company(
+    company_id: str,
+    data: Dict[str, Any],
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    ensure_company_scope(user, company_id)
+    company = first_or_404(db.query(CompanyModel).filter(CompanyModel.company_id == company_id), "Company not found")
+    for field in ["name", "tax_id", "address", "phone", "email"]:
+        if field in data:
+            setattr(company, field, data[field])
+    db.commit()
+    db.refresh(company)
+    return model_to_dict(company)
 
-@api_router.get("/users")
-async def get_users(request: Request):
-    user = await get_current_user(request)
-    users = await db.users.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    return users
 
-# ==================== CLIENT TYPES ====================
+@app.get("/api/users")
+def get_users(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    users = db.query(UserModel).filter(UserModel.company_id == user.company_id).all()
+    return [model_to_dict(item, exclude={"password_hash"}) for item in users]
 
-@api_router.get("/client-types")
-async def get_client_types(request: Request):
-    user = await get_current_user(request)
-    types = await db.client_types.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    return types
 
-@api_router.post("/client-types")
-async def create_client_type(data: dict, request: Request):
-    user = await get_current_user(request)
-    client_type = ClientType(company_id=user["company_id"], **data)
-    doc = client_type.model_dump()
-    doc["created_at"] = doc.get("created_at", datetime.now(timezone.utc)).isoformat() if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc).isoformat()
-    await db.client_types.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
+def scoped_list(model, user: UserModel, db: Session) -> List[Dict[str, Any]]:
+    return [model_to_dict(item) for item in company_filter(db.query(model), model, user).all()]
 
-@api_router.delete("/client-types/{type_id}")
-async def delete_client_type(type_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.client_types.delete_one({"type_id": type_id, "company_id": user["company_id"]})
+
+@app.get("/api/client-types")
+def get_client_types(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    return scoped_list(ClientTypeModel, user, db)
+
+
+@app.post("/api/client-types")
+def create_client_type(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = ClientTypeModel(type_id=prefixed_id("ct"), name=data["name"], description=data.get("description"), company_id=user.company_id)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/client-types/{type_id}")
+def delete_client_type(type_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(ClientTypeModel), ClientTypeModel, user).filter(ClientTypeModel.type_id == type_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-# ==================== CLIENTS ====================
 
-@api_router.get("/clients")
-async def get_clients(request: Request):
-    user = await get_current_user(request)
-    clients = await db.clients.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(1000)
-    return clients
+@app.get("/api/clients")
+def get_clients(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    return scoped_list(ClientModel, user, db)
 
-@api_router.get("/clients/{client_id}")
-async def get_client(client_id: str, request: Request):
-    user = await get_current_user(request)
-    client = await db.clients.find_one({"client_id": client_id, "company_id": user["company_id"]}, {"_id": 0})
-    if not client:
-        raise HTTPException(status_code=404, detail="Client not found")
-    return client
 
-@api_router.post("/clients")
-async def create_client(data: dict, request: Request):
-    user = await get_current_user(request)
-    client = Client(company_id=user["company_id"], **data)
-    doc = client.model_dump()
-    doc["created_at"] = doc["created_at"].isoformat()
-    await db.clients.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
+@app.get("/api/clients/{client_id}")
+def get_client(client_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == client_id), "Client not found")
+    return model_to_dict(item)
 
-@api_router.put("/clients/{client_id}")
-async def update_client(client_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    await db.clients.update_one(
-        {"client_id": client_id, "company_id": user["company_id"]},
-        {"$set": data}
+
+@app.post("/api/clients")
+def create_client(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = ClientModel(
+        client_id=prefixed_id("cli"),
+        name=data["name"],
+        email=data.get("email"),
+        phone=data.get("phone"),
+        address=data.get("address"),
+        tax_id=data.get("tax_id"),
+        type_id=data.get("type_id"),
+        balance=float(data.get("balance", 0) or 0),
+        company_id=user.company_id,
     )
-    client = await db.clients.find_one({"client_id": client_id}, {"_id": 0})
-    return client
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
-@api_router.delete("/clients/{client_id}")
-async def delete_client(client_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.clients.delete_one({"client_id": client_id, "company_id": user["company_id"]})
+
+@app.put("/api/clients/{client_id}")
+def update_client(client_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == client_id), "Client not found")
+    for field in ["name", "email", "phone", "address", "tax_id", "type_id", "balance"]:
+        if field in data:
+            setattr(item, field, data[field])
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/clients/{client_id}")
+def delete_client(client_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == client_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-# ==================== SUPPLIER TYPES ====================
 
-@api_router.get("/supplier-types")
-async def get_supplier_types(request: Request):
-    user = await get_current_user(request)
-    types = await db.supplier_types.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    return types
+@app.get("/api/supplier-types")
+def get_supplier_types(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    return scoped_list(SupplierTypeModel, user, db)
 
-@api_router.post("/supplier-types")
-async def create_supplier_type(data: dict, request: Request):
-    user = await get_current_user(request)
-    supplier_type = SupplierType(company_id=user["company_id"], **data)
-    doc = supplier_type.model_dump()
-    await db.supplier_types.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
 
-@api_router.delete("/supplier-types/{type_id}")
-async def delete_supplier_type(type_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.supplier_types.delete_one({"type_id": type_id, "company_id": user["company_id"]})
+@app.post("/api/supplier-types")
+def create_supplier_type(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = SupplierTypeModel(type_id=prefixed_id("st"), name=data["name"], description=data.get("description"), company_id=user.company_id)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/supplier-types/{type_id}")
+def delete_supplier_type(type_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(SupplierTypeModel), SupplierTypeModel, user).filter(SupplierTypeModel.type_id == type_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-# ==================== SUPPLIERS ====================
 
-@api_router.get("/suppliers")
-async def get_suppliers(request: Request):
-    user = await get_current_user(request)
-    suppliers = await db.suppliers.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(1000)
-    return suppliers
+@app.get("/api/suppliers")
+def get_suppliers(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    return scoped_list(SupplierModel, user, db)
 
-@api_router.get("/suppliers/{supplier_id}")
-async def get_supplier(supplier_id: str, request: Request):
-    user = await get_current_user(request)
-    supplier = await db.suppliers.find_one({"supplier_id": supplier_id, "company_id": user["company_id"]}, {"_id": 0})
-    if not supplier:
-        raise HTTPException(status_code=404, detail="Supplier not found")
-    return supplier
 
-@api_router.post("/suppliers")
-async def create_supplier(data: dict, request: Request):
-    user = await get_current_user(request)
-    supplier = Supplier(company_id=user["company_id"], **data)
-    doc = supplier.model_dump()
-    doc["created_at"] = doc["created_at"].isoformat()
-    await db.suppliers.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
+@app.get("/api/suppliers/{supplier_id}")
+def get_supplier(supplier_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == supplier_id), "Supplier not found")
+    return model_to_dict(item)
 
-@api_router.put("/suppliers/{supplier_id}")
-async def update_supplier(supplier_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    await db.suppliers.update_one(
-        {"supplier_id": supplier_id, "company_id": user["company_id"]},
-        {"$set": data}
+
+@app.post("/api/suppliers")
+def create_supplier(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = SupplierModel(
+        supplier_id=prefixed_id("sup"),
+        name=data["name"],
+        email=data.get("email"),
+        phone=data.get("phone"),
+        address=data.get("address"),
+        tax_id=data.get("tax_id"),
+        type_id=data.get("type_id"),
+        balance=float(data.get("balance", 0) or 0),
+        company_id=user.company_id,
     )
-    supplier = await db.suppliers.find_one({"supplier_id": supplier_id}, {"_id": 0})
-    return supplier
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
-@api_router.delete("/suppliers/{supplier_id}")
-async def delete_supplier(supplier_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.suppliers.delete_one({"supplier_id": supplier_id, "company_id": user["company_id"]})
+
+@app.put("/api/suppliers/{supplier_id}")
+def update_supplier(supplier_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == supplier_id), "Supplier not found")
+    for field in ["name", "email", "phone", "address", "tax_id", "type_id", "balance"]:
+        if field in data:
+            setattr(item, field, data[field])
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/suppliers/{supplier_id}")
+def delete_supplier(supplier_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == supplier_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-# ==================== PRODUCT TYPES ====================
 
-@api_router.get("/product-types")
-async def get_product_types(request: Request):
-    user = await get_current_user(request)
-    types = await db.product_types.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    return types
+@app.get("/api/product-types")
+def get_product_types(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    return scoped_list(ProductTypeModel, user, db)
 
-@api_router.post("/product-types")
-async def create_product_type(data: dict, request: Request):
-    user = await get_current_user(request)
-    product_type = ProductType(company_id=user["company_id"], **data)
-    doc = product_type.model_dump()
-    await db.product_types.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
 
-@api_router.delete("/product-types/{type_id}")
-async def delete_product_type(type_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.product_types.delete_one({"type_id": type_id, "company_id": user["company_id"]})
+@app.post("/api/product-types")
+def create_product_type(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = ProductTypeModel(type_id=prefixed_id("pt"), name=data["name"], description=data.get("description"), company_id=user.company_id)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/product-types/{type_id}")
+def delete_product_type(type_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(ProductTypeModel), ProductTypeModel, user).filter(ProductTypeModel.type_id == type_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-# ==================== PRODUCTS ====================
 
-@api_router.get("/products")
-async def get_products(request: Request):
-    user = await get_current_user(request)
-    products = await db.products.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(1000)
-    return products
+@app.get("/api/products")
+def get_products(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    return scoped_list(ProductModel, user, db)
 
-@api_router.get("/products/{product_id}")
-async def get_product(product_id: str, request: Request):
-    user = await get_current_user(request)
-    product = await db.products.find_one({"product_id": product_id, "company_id": user["company_id"]}, {"_id": 0})
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return product
 
-@api_router.post("/products")
-async def create_product(data: dict, request: Request):
-    user = await get_current_user(request)
-    product = Product(company_id=user["company_id"], **data)
-    doc = product.model_dump()
-    doc["created_at"] = doc["created_at"].isoformat()
-    await db.products.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
+@app.get("/api/products/{product_id}")
+def get_product(product_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id), "Product not found")
+    return model_to_dict(item)
 
-@api_router.put("/products/{product_id}")
-async def update_product(product_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    await db.products.update_one(
-        {"product_id": product_id, "company_id": user["company_id"]},
-        {"$set": data}
+
+@app.post("/api/products")
+def create_product(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = ProductModel(
+        product_id=prefixed_id("prod"),
+        sku=data["sku"],
+        name=data["name"],
+        description=data.get("description"),
+        price=float(data.get("price", 0) or 0),
+        cost=float(data.get("cost", 0) or 0),
+        type_id=data.get("type_id"),
+        company_id=user.company_id,
     )
-    product = await db.products.find_one({"product_id": product_id}, {"_id": 0})
-    return product
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
-@api_router.delete("/products/{product_id}")
-async def delete_product(product_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.products.delete_one({"product_id": product_id, "company_id": user["company_id"]})
+
+@app.put("/api/products/{product_id}")
+def update_product(product_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id), "Product not found")
+    for field in ["sku", "name", "description", "price", "cost", "type_id"]:
+        if field in data:
+            setattr(item, field, data[field])
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/products/{product_id}")
+def delete_product(product_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-@api_router.post("/products/import-csv")
-async def import_products_csv(file: UploadFile = File(...), request: Request = None):
-    user = await get_current_user(request)
-    content = await file.read()
-    decoded = content.decode('utf-8')
-    reader = csv.DictReader(io.StringIO(decoded))
-    
+
+@app.post("/api/products/import-csv")
+async def import_products_csv(file: UploadFile = File(...), user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    content = (await file.read()).decode("utf-8")
+    reader = csv.DictReader(io.StringIO(content))
     imported = 0
     for row in reader:
-        product = Product(
-            company_id=user["company_id"],
-            sku=row.get("sku", f"SKU-{uuid.uuid4().hex[:8]}"),
-            name=row.get("name", ""),
-            description=row.get("description", ""),
-            price=float(row.get("price", 0)),
-            cost=float(row.get("cost", 0))
+        db.add(
+            ProductModel(
+                product_id=prefixed_id("prod"),
+                sku=row.get("sku") or f"SKU-{uuid.uuid4().hex[:8]}",
+                name=row.get("name", ""),
+                description=row.get("description"),
+                price=float(row.get("price", 0) or 0),
+                cost=float(row.get("cost", 0) or 0),
+                company_id=user.company_id,
+            )
         )
-        doc = product.model_dump()
-        doc["created_at"] = doc["created_at"].isoformat()
-        await db.products.insert_one(doc)
         imported += 1
-    
+    db.commit()
     return {"message": f"Imported {imported} products"}
 
-# ==================== WAREHOUSES ====================
 
-@api_router.get("/warehouses")
-async def get_warehouses(request: Request):
-    user = await get_current_user(request)
-    warehouses = await db.warehouses.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    return warehouses
+@app.get("/api/warehouses")
+def get_warehouses(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    return scoped_list(WarehouseModel, user, db)
 
-@api_router.post("/warehouses")
-async def create_warehouse(data: dict, request: Request):
-    user = await get_current_user(request)
-    warehouse = Warehouse(company_id=user["company_id"], **data)
-    doc = warehouse.model_dump()
-    doc["created_at"] = doc["created_at"].isoformat()
-    await db.warehouses.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
 
-@api_router.put("/warehouses/{warehouse_id}")
-async def update_warehouse(warehouse_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    await db.warehouses.update_one(
-        {"warehouse_id": warehouse_id, "company_id": user["company_id"]},
-        {"$set": data}
-    )
-    warehouse = await db.warehouses.find_one({"warehouse_id": warehouse_id}, {"_id": 0})
-    return warehouse
+@app.post("/api/warehouses")
+def create_warehouse(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = WarehouseModel(warehouse_id=prefixed_id("wh"), name=data["name"], address=data.get("address"), company_id=user.company_id)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
-@api_router.delete("/warehouses/{warehouse_id}")
-async def delete_warehouse(warehouse_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.warehouses.delete_one({"warehouse_id": warehouse_id, "company_id": user["company_id"]})
+
+@app.put("/api/warehouses/{warehouse_id}")
+def update_warehouse(warehouse_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(WarehouseModel), WarehouseModel, user).filter(WarehouseModel.warehouse_id == warehouse_id), "Warehouse not found")
+    for field in ["name", "address"]:
+        if field in data:
+            setattr(item, field, data[field])
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/warehouses/{warehouse_id}")
+def delete_warehouse(warehouse_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(WarehouseModel), WarehouseModel, user).filter(WarehouseModel.warehouse_id == warehouse_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-# ==================== INVENTORY ====================
 
-@api_router.get("/inventory")
-async def get_inventory(request: Request, warehouse_id: Optional[str] = None):
-    user = await get_current_user(request)
-    query = {"company_id": user["company_id"]}
+@app.get("/api/inventory")
+def get_inventory(warehouse_id: Optional[str] = None, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    query = company_filter(db.query(InventoryModel), InventoryModel, user)
     if warehouse_id:
-        query["warehouse_id"] = warehouse_id
-    inventory = await db.inventory.find(query, {"_id": 0}).to_list(1000)
-    return inventory
+        query = query.filter(InventoryModel.warehouse_id == warehouse_id)
+    return [model_to_dict(item) for item in query.all()]
 
-@api_router.post("/inventory")
-async def create_inventory(data: dict, request: Request):
-    user = await get_current_user(request)
-    inv = Inventory(company_id=user["company_id"], **data)
-    doc = inv.model_dump()
-    doc["updated_at"] = doc["updated_at"].isoformat()
-    
-    existing = await db.inventory.find_one({
-        "product_id": data["product_id"],
-        "warehouse_id": data["warehouse_id"],
-        "company_id": user["company_id"]
-    })
-    
+
+@app.post("/api/inventory")
+def create_inventory(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    existing = company_filter(db.query(InventoryModel), InventoryModel, user).filter(
+        InventoryModel.product_id == data["product_id"],
+        InventoryModel.warehouse_id == data["warehouse_id"],
+    ).first()
     if existing:
-        await db.inventory.update_one(
-            {"inventory_id": existing["inventory_id"]},
-            {"$set": {"quantity": data.get("quantity", 0), "min_stock": data.get("min_stock", 0), "updated_at": datetime.now(timezone.utc).isoformat()}}
-        )
-        return await db.inventory.find_one({"inventory_id": existing["inventory_id"]}, {"_id": 0})
-    
-    await db.inventory.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
+        existing.quantity = int(data.get("quantity", 0) or 0)
+        existing.min_stock = int(data.get("min_stock", 0) or 0)
+        existing.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(existing)
+        return model_to_dict(existing)
 
-@api_router.put("/inventory/{inventory_id}")
-async def update_inventory(inventory_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.inventory.update_one(
-        {"inventory_id": inventory_id, "company_id": user["company_id"]},
-        {"$set": data}
+    item = InventoryModel(
+        inventory_id=prefixed_id("inv"),
+        product_id=data["product_id"],
+        warehouse_id=data["warehouse_id"],
+        quantity=int(data.get("quantity", 0) or 0),
+        min_stock=int(data.get("min_stock", 0) or 0),
+        company_id=user.company_id,
     )
-    inv = await db.inventory.find_one({"inventory_id": inventory_id}, {"_id": 0})
-    return inv
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
-@api_router.post("/inventory/import-csv")
-async def import_inventory_csv(file: UploadFile = File(...), warehouse_id: str = None, request: Request = None):
-    user = await get_current_user(request)
-    content = await file.read()
-    decoded = content.decode('utf-8')
-    reader = csv.DictReader(io.StringIO(decoded))
-    
+
+@app.put("/api/inventory/{inventory_id}")
+def update_inventory(inventory_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(InventoryModel), InventoryModel, user).filter(InventoryModel.inventory_id == inventory_id), "Inventory not found")
+    for field in ["product_id", "warehouse_id", "quantity", "min_stock"]:
+        if field in data:
+            setattr(item, field, data[field])
+    item.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.post("/api/inventory/import-csv")
+async def import_inventory_csv(
+    warehouse_id: Optional[str] = None,
+    file: UploadFile = File(...),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, str]:
     if not warehouse_id:
-        wh = await db.warehouses.find_one({"company_id": user["company_id"]}, {"_id": 0})
-        warehouse_id = wh["warehouse_id"] if wh else None
-    
+        default_warehouse = company_filter(db.query(WarehouseModel), WarehouseModel, user).first()
+        warehouse_id = default_warehouse.warehouse_id if default_warehouse else None
+    if not warehouse_id:
+        raise HTTPException(status_code=400, detail="No warehouse available")
+
+    content = (await file.read()).decode("utf-8")
+    reader = csv.DictReader(io.StringIO(content))
     imported = 0
     for row in reader:
-        product = await db.products.find_one({"sku": row.get("sku"), "company_id": user["company_id"]}, {"_id": 0})
+        product = company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.sku == row.get("sku")).first()
         if not product:
-            product = Product(
-                company_id=user["company_id"],
-                sku=row.get("sku", f"SKU-{uuid.uuid4().hex[:8]}"),
-                name=row.get("name", row.get("sku", "")),
-                price=float(row.get("price", 0)),
-                cost=float(row.get("cost", 0))
+            product = ProductModel(
+                product_id=prefixed_id("prod"),
+                sku=row.get("sku") or f"SKU-{uuid.uuid4().hex[:8]}",
+                name=row.get("name") or row.get("sku") or "",
+                price=float(row.get("price", 0) or 0),
+                cost=float(row.get("cost", 0) or 0),
+                company_id=user.company_id,
             )
-            doc = product.model_dump()
-            doc["created_at"] = doc["created_at"].isoformat()
-            await db.products.insert_one(doc)
-            product = doc
-        
-        inv = Inventory(
-            company_id=user["company_id"],
-            product_id=product["product_id"],
-            warehouse_id=warehouse_id,
-            quantity=int(row.get("quantity", 0)),
-            min_stock=int(row.get("min_stock", 0))
-        )
-        doc = inv.model_dump()
-        doc["updated_at"] = doc["updated_at"].isoformat()
-        
-        existing = await db.inventory.find_one({
-            "product_id": product["product_id"],
-            "warehouse_id": warehouse_id
-        })
-        
-        if existing:
-            await db.inventory.update_one(
-                {"inventory_id": existing["inventory_id"]},
-                {"$set": {"quantity": int(row.get("quantity", 0)), "updated_at": datetime.now(timezone.utc).isoformat()}}
-            )
+            db.add(product)
+            db.flush()
+
+        item = company_filter(db.query(InventoryModel), InventoryModel, user).filter(
+            InventoryModel.product_id == product.product_id,
+            InventoryModel.warehouse_id == warehouse_id,
+        ).first()
+        if item:
+            item.quantity = int(row.get("quantity", 0) or 0)
+            item.min_stock = int(row.get("min_stock", item.min_stock or 0) or 0)
+            item.updated_at = datetime.now(timezone.utc)
         else:
-            await db.inventory.insert_one(doc)
+            db.add(
+                InventoryModel(
+                    inventory_id=prefixed_id("inv"),
+                    product_id=product.product_id,
+                    warehouse_id=warehouse_id,
+                    quantity=int(row.get("quantity", 0) or 0),
+                    min_stock=int(row.get("min_stock", 0) or 0),
+                    company_id=user.company_id,
+                )
+            )
         imported += 1
-    
+    db.commit()
     return {"message": f"Imported {imported} inventory items"}
 
-# ==================== ORDERS ====================
 
-async def generate_order_number(company_id: str):
-    count = await db.orders.count_documents({"company_id": company_id})
-    return f"PED-{str(count + 1).zfill(6)}"
+@app.get("/api/orders")
+def get_orders(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    items = company_filter(db.query(OrderModel), OrderModel, user).order_by(OrderModel.created_at.desc()).all()
+    return [model_to_dict(item) for item in items]
 
-@api_router.get("/orders")
-async def get_orders(request: Request):
-    user = await get_current_user(request)
-    orders = await db.orders.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(1000)
-    return orders
 
-@api_router.get("/orders/{order_id}")
-async def get_order(order_id: str, request: Request):
-    user = await get_current_user(request)
-    order = await db.orders.find_one({"order_id": order_id, "company_id": user["company_id"]}, {"_id": 0})
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return order
+@app.get("/api/orders/{order_id}")
+def get_order(order_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == order_id), "Order not found")
+    return model_to_dict(item)
 
-@api_router.post("/orders")
-async def create_order(data: dict, request: Request):
-    user = await get_current_user(request)
-    order_number = await generate_order_number(user["company_id"])
-    
-    client = await db.clients.find_one({"client_id": data["client_id"]}, {"_id": 0})
-    client_name = client["name"] if client else "Unknown"
-    
-    items = []
-    subtotal = 0
-    for item in data.get("items", []):
-        product = await db.products.find_one({"product_id": item["product_id"]}, {"_id": 0})
-        if product:
-            total = item["quantity"] * item["price"]
-            items.append(OrderItem(
-                product_id=item["product_id"],
-                product_name=product["name"],
-                quantity=item["quantity"],
-                price=item["price"],
-                total=total
-            ))
-            subtotal += total
-    
+
+@app.post("/api/orders")
+def create_order(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    client = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == data["client_id"]), "Client not found")
+    products_by_id = lookup_products(db, user, data.get("items", []))
+    items, subtotal = build_line_items(data.get("items", []), products_by_id)
     tax = subtotal * 0.21
-    total = subtotal + tax
-    
-    order = Order(
-        company_id=user["company_id"],
-        order_number=order_number,
-        client_id=data["client_id"],
-        client_name=client_name,
-        items=[i.model_dump() for i in items],
+
+    item = OrderModel(
+        order_id=prefixed_id("ord"),
+        order_number=generate_sequence("PED", OrderModel, user.company_id, db),
+        client_id=client.client_id,
+        client_name=client.name,
+        items=items,
         subtotal=subtotal,
         tax=tax,
-        total=total,
+        total=subtotal + tax,
         status=data.get("status", "pending"),
-        warehouse_id=data.get("warehouse_id")
+        warehouse_id=data.get("warehouse_id"),
+        company_id=user.company_id,
     )
-    doc = order.model_dump()
-    doc["created_at"] = doc["created_at"].isoformat()
-    await db.orders.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
-@api_router.put("/orders/{order_id}")
-async def update_order(order_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    await db.orders.update_one(
-        {"order_id": order_id, "company_id": user["company_id"]},
-        {"$set": data}
-    )
-    order = await db.orders.find_one({"order_id": order_id}, {"_id": 0})
-    return order
 
-@api_router.delete("/orders/{order_id}")
-async def delete_order(order_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.orders.delete_one({"order_id": order_id, "company_id": user["company_id"]})
+@app.put("/api/orders/{order_id}")
+def update_order(order_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == order_id), "Order not found")
+    for field in ["status", "warehouse_id"]:
+        if field in data:
+            setattr(item, field, data[field])
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/orders/{order_id}")
+def delete_order(order_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == order_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-# ==================== INVOICES ====================
 
-async def generate_invoice_number(company_id: str):
-    count = await db.invoices.count_documents({"company_id": company_id})
-    return f"FAC-{str(count + 1).zfill(6)}"
+@app.get("/api/invoices")
+def get_invoices(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    items = company_filter(db.query(InvoiceModel), InvoiceModel, user).order_by(InvoiceModel.created_at.desc()).all()
+    return [model_to_dict(item) for item in items]
 
-@api_router.get("/invoices")
-async def get_invoices(request: Request):
-    user = await get_current_user(request)
-    invoices = await db.invoices.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(1000)
-    return invoices
 
-@api_router.get("/invoices/{invoice_id}")
-async def get_invoice(invoice_id: str, request: Request):
-    user = await get_current_user(request)
-    invoice = await db.invoices.find_one({"invoice_id": invoice_id, "company_id": user["company_id"]}, {"_id": 0})
-    if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    return invoice
+@app.get("/api/invoices/{invoice_id}")
+def get_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
+    return model_to_dict(item)
 
-@api_router.post("/invoices")
-async def create_invoice(data: dict, request: Request):
-    user = await get_current_user(request)
-    invoice_number = await generate_invoice_number(user["company_id"])
-    
-    client = await db.clients.find_one({"client_id": data["client_id"]}, {"_id": 0})
-    client_name = client["name"] if client else "Unknown"
-    
-    items = []
-    subtotal = 0
-    for item in data.get("items", []):
-        product = await db.products.find_one({"product_id": item["product_id"]}, {"_id": 0})
-        if product:
-            total = item["quantity"] * item["price"]
-            items.append(OrderItem(
-                product_id=item["product_id"],
-                product_name=product["name"],
-                quantity=item["quantity"],
-                price=item["price"],
-                total=total
-            ))
-            subtotal += total
-    
+
+@app.post("/api/invoices")
+def create_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    client = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == data["client_id"]), "Client not found")
+    products_by_id = lookup_products(db, user, data.get("items", []))
+    items, subtotal = build_line_items(data.get("items", []), products_by_id)
     tax = subtotal * 0.21
-    total = subtotal + tax
-    
-    due_date = None
-    if data.get("due_date"):
-        due_date = datetime.fromisoformat(data["due_date"]).isoformat()
-    
-    invoice = Invoice(
-        company_id=user["company_id"],
-        invoice_number=invoice_number,
-        client_id=data["client_id"],
-        client_name=client_name,
+
+    item = InvoiceModel(
+        invoice_id=prefixed_id("inv"),
+        invoice_number=generate_sequence("FAC", InvoiceModel, user.company_id, db),
+        client_id=client.client_id,
+        client_name=client.name,
         order_id=data.get("order_id"),
-        items=[i.model_dump() for i in items],
+        items=items,
         subtotal=subtotal,
         tax=tax,
-        total=total,
+        total=subtotal + tax,
         status=data.get("status", "pending"),
-        due_date=due_date
+        due_date=parse_iso_datetime(data.get("due_date")),
+        company_id=user.company_id,
     )
-    doc = invoice.model_dump()
-    doc["created_at"] = doc["created_at"].isoformat()
-    await db.invoices.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
-@api_router.put("/invoices/{invoice_id}")
-async def update_invoice(invoice_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    if data.get("status") == "paid" and not data.get("paid_date"):
-        data["paid_date"] = datetime.now(timezone.utc).isoformat()
-    await db.invoices.update_one(
-        {"invoice_id": invoice_id, "company_id": user["company_id"]},
-        {"$set": data}
-    )
-    invoice = await db.invoices.find_one({"invoice_id": invoice_id}, {"_id": 0})
-    return invoice
 
-@api_router.delete("/invoices/{invoice_id}")
-async def delete_invoice(invoice_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.invoices.delete_one({"invoice_id": invoice_id, "company_id": user["company_id"]})
-    return {"message": "Deleted"}
-
-# ==================== PURCHASE ORDERS ====================
-
-async def generate_po_number(company_id: str):
-    count = await db.purchase_orders.count_documents({"company_id": company_id})
-    return f"OC-{str(count + 1).zfill(6)}"
-
-@api_router.get("/purchase-orders")
-async def get_purchase_orders(request: Request):
-    user = await get_current_user(request)
-    pos = await db.purchase_orders.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(1000)
-    return pos
-
-@api_router.post("/purchase-orders")
-async def create_purchase_order(data: dict, request: Request):
-    user = await get_current_user(request)
-    po_number = await generate_po_number(user["company_id"])
-    
-    supplier = await db.suppliers.find_one({"supplier_id": data["supplier_id"]}, {"_id": 0})
-    supplier_name = supplier["name"] if supplier else "Unknown"
-    
-    items = []
-    subtotal = 0
-    for item in data.get("items", []):
-        product = await db.products.find_one({"product_id": item["product_id"]}, {"_id": 0})
-        if product:
-            total = item["quantity"] * item["price"]
-            items.append(OrderItem(
-                product_id=item["product_id"],
-                product_name=product["name"],
-                quantity=item["quantity"],
-                price=item["price"],
-                total=total
-            ))
-            subtotal += total
-    
-    tax = subtotal * 0.21
-    total = subtotal + tax
-    
-    po = PurchaseOrder(
-        company_id=user["company_id"],
-        po_number=po_number,
-        supplier_id=data["supplier_id"],
-        supplier_name=supplier_name,
-        items=[i.model_dump() for i in items],
-        subtotal=subtotal,
-        tax=tax,
-        total=total,
-        status=data.get("status", "pending"),
-        warehouse_id=data.get("warehouse_id")
-    )
-    doc = po.model_dump()
-    doc["created_at"] = doc["created_at"].isoformat()
-    await db.purchase_orders.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
-
-@api_router.put("/purchase-orders/{po_id}")
-async def update_purchase_order(po_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    await db.purchase_orders.update_one(
-        {"po_id": po_id, "company_id": user["company_id"]},
-        {"$set": data}
-    )
-    po = await db.purchase_orders.find_one({"po_id": po_id}, {"_id": 0})
-    return po
-
-@api_router.delete("/purchase-orders/{po_id}")
-async def delete_purchase_order(po_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.purchase_orders.delete_one({"po_id": po_id, "company_id": user["company_id"]})
-    return {"message": "Deleted"}
-
-# ==================== PURCHASE INVOICES ====================
-
-async def generate_pinv_number(company_id: str):
-    count = await db.purchase_invoices.count_documents({"company_id": company_id})
-    return f"FC-{str(count + 1).zfill(6)}"
-
-@api_router.get("/purchase-invoices")
-async def get_purchase_invoices(request: Request):
-    user = await get_current_user(request)
-    pinvs = await db.purchase_invoices.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(1000)
-    return pinvs
-
-@api_router.post("/purchase-invoices")
-async def create_purchase_invoice(data: dict, request: Request):
-    user = await get_current_user(request)
-    invoice_number = await generate_pinv_number(user["company_id"])
-    
-    supplier = await db.suppliers.find_one({"supplier_id": data["supplier_id"]}, {"_id": 0})
-    supplier_name = supplier["name"] if supplier else "Unknown"
-    
-    items = []
-    subtotal = 0
-    for item in data.get("items", []):
-        product = await db.products.find_one({"product_id": item["product_id"]}, {"_id": 0})
-        if product:
-            total = item["quantity"] * item["price"]
-            items.append(OrderItem(
-                product_id=item["product_id"],
-                product_name=product["name"],
-                quantity=item["quantity"],
-                price=item["price"],
-                total=total
-            ))
-            subtotal += total
-    
-    tax = subtotal * 0.21
-    total = subtotal + tax
-    
-    due_date = None
+@app.put("/api/invoices/{invoice_id}")
+def update_invoice(invoice_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
+    if "status" in data:
+        item.status = data["status"]
     if data.get("due_date"):
-        due_date = datetime.fromisoformat(data["due_date"]).isoformat()
-    
-    pinv = PurchaseInvoice(
-        company_id=user["company_id"],
-        invoice_number=invoice_number,
-        supplier_id=data["supplier_id"],
-        supplier_name=supplier_name,
-        po_id=data.get("po_id"),
-        items=[i.model_dump() for i in items],
-        subtotal=subtotal,
-        tax=tax,
-        total=total,
-        status=data.get("status", "pending"),
-        due_date=due_date
-    )
-    doc = pinv.model_dump()
-    doc["created_at"] = doc["created_at"].isoformat()
-    await db.purchase_invoices.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "_id"}
+        item.due_date = parse_iso_datetime(data["due_date"])
+    if data.get("status") == "paid" and not item.paid_date:
+        item.paid_date = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
-@api_router.put("/purchase-invoices/{pinv_id}")
-async def update_purchase_invoice(pinv_id: str, data: dict, request: Request):
-    user = await get_current_user(request)
-    if data.get("status") == "paid" and not data.get("paid_date"):
-        data["paid_date"] = datetime.now(timezone.utc).isoformat()
-    await db.purchase_invoices.update_one(
-        {"pinv_id": pinv_id, "company_id": user["company_id"]},
-        {"$set": data}
-    )
-    pinv = await db.purchase_invoices.find_one({"pinv_id": pinv_id}, {"_id": 0})
-    return pinv
 
-@api_router.delete("/purchase-invoices/{pinv_id}")
-async def delete_purchase_invoice(pinv_id: str, request: Request):
-    user = await get_current_user(request)
-    await db.purchase_invoices.delete_one({"pinv_id": pinv_id, "company_id": user["company_id"]})
+@app.delete("/api/invoices/{invoice_id}")
+def delete_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id).delete()
+    db.commit()
     return {"message": "Deleted"}
 
-# ==================== REPORTS ====================
 
-@api_router.get("/reports/dashboard")
-async def get_dashboard_stats(request: Request):
-    user = await get_current_user(request)
-    company_id = user["company_id"]
-    
-    clients_count = await db.clients.count_documents({"company_id": company_id})
-    suppliers_count = await db.suppliers.count_documents({"company_id": company_id})
-    products_count = await db.products.count_documents({"company_id": company_id})
-    orders_count = await db.orders.count_documents({"company_id": company_id})
-    
-    invoices = await db.invoices.find({"company_id": company_id}, {"_id": 0}).to_list(1000)
-    total_sales = sum(inv.get("total", 0) for inv in invoices)
-    pending_invoices = sum(1 for inv in invoices if inv.get("status") == "pending")
-    
-    purchase_invoices = await db.purchase_invoices.find({"company_id": company_id}, {"_id": 0}).to_list(1000)
-    total_purchases = sum(pinv.get("total", 0) for pinv in purchase_invoices)
-    
-    inventory = await db.inventory.find({"company_id": company_id}, {"_id": 0}).to_list(1000)
-    low_stock_count = sum(1 for inv in inventory if inv.get("quantity", 0) <= inv.get("min_stock", 0))
-    
-    recent_orders = await db.orders.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(5)
-    recent_invoices = await db.invoices.find({"company_id": company_id}, {"_id": 0}).sort("created_at", -1).to_list(5)
-    
+@app.get("/api/purchase-orders")
+def get_purchase_orders(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    items = company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).order_by(PurchaseOrderModel.created_at.desc()).all()
+    return [model_to_dict(item) for item in items]
+
+
+@app.post("/api/purchase-orders")
+def create_purchase_order(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    supplier = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == data["supplier_id"]), "Supplier not found")
+    products_by_id = lookup_products(db, user, data.get("items", []))
+    items, subtotal = build_line_items(data.get("items", []), products_by_id)
+    tax = subtotal * 0.21
+
+    item = PurchaseOrderModel(
+        po_id=prefixed_id("po"),
+        po_number=generate_sequence("OC", PurchaseOrderModel, user.company_id, db),
+        supplier_id=supplier.supplier_id,
+        supplier_name=supplier.name,
+        items=items,
+        subtotal=subtotal,
+        tax=tax,
+        total=subtotal + tax,
+        status=data.get("status", "pending"),
+        warehouse_id=data.get("warehouse_id"),
+        company_id=user.company_id,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.put("/api/purchase-orders/{po_id}")
+def update_purchase_order(po_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).filter(PurchaseOrderModel.po_id == po_id), "Purchase order not found")
+    for field in ["status", "warehouse_id"]:
+        if field in data:
+            setattr(item, field, data[field])
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/purchase-orders/{po_id}")
+def delete_purchase_order(po_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).filter(PurchaseOrderModel.po_id == po_id).delete()
+    db.commit()
+    return {"message": "Deleted"}
+
+
+@app.get("/api/purchase-invoices")
+def get_purchase_invoices(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    items = company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).order_by(PurchaseInvoiceModel.created_at.desc()).all()
+    return [model_to_dict(item) for item in items]
+
+
+@app.post("/api/purchase-invoices")
+def create_purchase_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    supplier = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == data["supplier_id"]), "Supplier not found")
+    products_by_id = lookup_products(db, user, data.get("items", []))
+    items, subtotal = build_line_items(data.get("items", []), products_by_id)
+    tax = subtotal * 0.21
+
+    item = PurchaseInvoiceModel(
+        pinv_id=prefixed_id("pinv"),
+        invoice_number=generate_sequence("FC", PurchaseInvoiceModel, user.company_id, db),
+        supplier_id=supplier.supplier_id,
+        supplier_name=supplier.name,
+        po_id=data.get("po_id"),
+        items=items,
+        subtotal=subtotal,
+        tax=tax,
+        total=subtotal + tax,
+        status=data.get("status", "pending"),
+        due_date=parse_iso_datetime(data.get("due_date")),
+        company_id=user.company_id,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.put("/api/purchase-invoices/{pinv_id}")
+def update_purchase_invoice(pinv_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    item = first_or_404(company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.pinv_id == pinv_id), "Purchase invoice not found")
+    if "status" in data:
+        item.status = data["status"]
+    if data.get("due_date"):
+        item.due_date = parse_iso_datetime(data["due_date"])
+    if data.get("status") == "paid" and not item.paid_date:
+        item.paid_date = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.delete("/api/purchase-invoices/{pinv_id}")
+def delete_purchase_invoice(pinv_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.pinv_id == pinv_id).delete()
+    db.commit()
+    return {"message": "Deleted"}
+
+
+@app.get("/api/reports/dashboard")
+def get_dashboard_stats(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    company_id = user.company_id
+    clients_count = db.query(ClientModel).filter(ClientModel.company_id == company_id).count()
+    suppliers_count = db.query(SupplierModel).filter(SupplierModel.company_id == company_id).count()
+    products_count = db.query(ProductModel).filter(ProductModel.company_id == company_id).count()
+    orders = db.query(OrderModel).filter(OrderModel.company_id == company_id).order_by(OrderModel.created_at.desc()).all()
+    invoices = db.query(InvoiceModel).filter(InvoiceModel.company_id == company_id).order_by(InvoiceModel.created_at.desc()).all()
+    purchase_invoices = db.query(PurchaseInvoiceModel).filter(PurchaseInvoiceModel.company_id == company_id).all()
+    inventory = db.query(InventoryModel).filter(InventoryModel.company_id == company_id).all()
+
     return {
         "clients_count": clients_count,
         "suppliers_count": suppliers_count,
         "products_count": products_count,
-        "orders_count": orders_count,
-        "total_sales": total_sales,
-        "total_purchases": total_purchases,
-        "pending_invoices": pending_invoices,
-        "low_stock_count": low_stock_count,
-        "recent_orders": recent_orders,
-        "recent_invoices": recent_invoices
+        "orders_count": len(orders),
+        "total_sales": sum(invoice.total or 0 for invoice in invoices),
+        "total_purchases": sum(item.total or 0 for item in purchase_invoices),
+        "pending_invoices": sum(1 for invoice in invoices if invoice.status == "pending"),
+        "low_stock_count": sum(1 for item in inventory if item.quantity <= item.min_stock),
+        "recent_orders": [model_to_dict(item) for item in orders[:5]],
+        "recent_invoices": [model_to_dict(item) for item in invoices[:5]],
     }
 
-@api_router.get("/reports/export/{report_type}")
-async def export_report(report_type: str, request: Request):
-    user = await get_current_user(request)
-    company_id = user["company_id"]
-    
-    data = []
-    filename = f"{report_type}.xlsx"
-    
-    if report_type == "clients":
-        data = await db.clients.find({"company_id": company_id}, {"_id": 0}).to_list(10000)
-    elif report_type == "suppliers":
-        data = await db.suppliers.find({"company_id": company_id}, {"_id": 0}).to_list(10000)
-    elif report_type == "products":
-        data = await db.products.find({"company_id": company_id}, {"_id": 0}).to_list(10000)
-    elif report_type == "inventory":
-        data = await db.inventory.find({"company_id": company_id}, {"_id": 0}).to_list(10000)
-    elif report_type == "orders":
-        data = await db.orders.find({"company_id": company_id}, {"_id": 0}).to_list(10000)
-    elif report_type == "invoices":
-        data = await db.invoices.find({"company_id": company_id}, {"_id": 0}).to_list(10000)
-    elif report_type == "purchase-orders":
-        data = await db.purchase_orders.find({"company_id": company_id}, {"_id": 0}).to_list(10000)
-    elif report_type == "purchase-invoices":
-        data = await db.purchase_invoices.find({"company_id": company_id}, {"_id": 0}).to_list(10000)
-    else:
+
+@app.get("/api/reports/export/{report_type}")
+def export_report(report_type: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> StreamingResponse:
+    table_map = {
+        "clients": ClientModel,
+        "suppliers": SupplierModel,
+        "products": ProductModel,
+        "inventory": InventoryModel,
+        "orders": OrderModel,
+        "invoices": InvoiceModel,
+        "purchase-orders": PurchaseOrderModel,
+        "purchase-invoices": PurchaseInvoiceModel,
+    }
+    model = table_map.get(report_type)
+    if not model:
         raise HTTPException(status_code=400, detail="Invalid report type")
-    
-    if not data:
+
+    items = company_filter(db.query(model), model, user).all()
+    if not items:
         raise HTTPException(status_code=404, detail="No data to export")
-    
-    df = pd.DataFrame(data)
-    
+
+    df = pd.DataFrame([model_to_dict(item) for item in items])
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=report_type)
     output.seek(0)
-    
+
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={"Content-Disposition": f"attachment; filename={report_type}.xlsx"},
     )
 
-# ==================== AI ASSISTANT ====================
 
-@api_router.get("/ai/chat-history")
-async def get_chat_history(request: Request):
-    user = await get_current_user(request)
-    messages = await db.chat_messages.find(
-        {"user_id": user["user_id"], "company_id": user["company_id"]},
-        {"_id": 0}
-    ).sort("created_at", 1).to_list(100)
-    return messages
+@app.get("/api/ai/chat-history")
+def get_chat_history(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    items = (
+        db.query(ChatMessageModel)
+        .filter(ChatMessageModel.user_id == user.user_id, ChatMessageModel.company_id == user.company_id)
+        .order_by(ChatMessageModel.created_at.asc())
+        .all()
+    )
+    return [model_to_dict(item) for item in items]
 
-@api_router.post("/ai/chat")
-async def chat_with_ai(data: dict, request: Request):
-    user = await get_current_user(request)
-    user_message = data.get("message", "")
-    
-    # Save user message
-    user_msg = ChatMessage(
-        user_id=user["user_id"],
-        company_id=user["company_id"],
+
+@app.post("/api/ai/chat")
+async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    user_message = data.get("message", "").strip()
+    if not user_message:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    user_msg = ChatMessageModel(
+        message_id=prefixed_id("msg"),
+        user_id=user.user_id,
+        company_id=user.company_id,
         role="user",
-        content=user_message
+        content=user_message,
     )
-    user_doc = user_msg.model_dump()
-    user_doc["created_at"] = user_doc["created_at"].isoformat()
-    await db.chat_messages.insert_one(user_doc)
-    
-    # Get context from database
-    clients = await db.clients.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    suppliers = await db.suppliers.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    products = await db.products.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(100)
-    invoices = await db.invoices.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(50)
-    orders = await db.orders.find({"company_id": user["company_id"]}, {"_id": 0}).to_list(50)
-    
+    db.add(user_msg)
+    db.commit()
+
+    clients = company_filter(db.query(ClientModel), ClientModel, user).limit(20).all()
+    suppliers = company_filter(db.query(SupplierModel), SupplierModel, user).limit(20).all()
+    products = company_filter(db.query(ProductModel), ProductModel, user).limit(20).all()
+    invoices = company_filter(db.query(InvoiceModel), InvoiceModel, user).order_by(InvoiceModel.created_at.desc()).limit(10).all()
+    orders = company_filter(db.query(OrderModel), OrderModel, user).order_by(OrderModel.created_at.desc()).limit(10).all()
+
     context = f"""
-Eres un asistente de IA para un sistema CRM. Tienes acceso a los siguientes datos de la empresa:
+Eres un asistente de IA para un ERP. Responde siempre en espanol y de forma concisa.
 
-CLIENTES ({len(clients)} total):
-{[{'nombre': c['name'], 'email': c.get('email'), 'id': c['client_id']} for c in clients[:20]]}
+CLIENTES:
+{[{"nombre": item.name, "email": item.email, "id": item.client_id} for item in clients]}
 
-PROVEEDORES ({len(suppliers)} total):
-{[{'nombre': s['name'], 'email': s.get('email'), 'id': s['supplier_id']} for s in suppliers[:20]]}
+PROVEEDORES:
+{[{"nombre": item.name, "email": item.email, "id": item.supplier_id} for item in suppliers]}
 
-PRODUCTOS ({len(products)} total):
-{[{'nombre': p['name'], 'sku': p['sku'], 'precio': p['price'], 'id': p['product_id']} for p in products[:20]]}
+PRODUCTOS:
+{[{"nombre": item.name, "sku": item.sku, "precio": item.price, "id": item.product_id} for item in products]}
 
-FACTURAS RECIENTES ({len(invoices)} total):
-{[{'numero': i['invoice_number'], 'cliente': i['client_name'], 'total': i['total'], 'estado': i['status']} for i in invoices[:10]]}
+FACTURAS:
+{[{"numero": item.invoice_number, "cliente": item.client_name, "total": item.total, "estado": item.status} for item in invoices]}
 
-PEDIDOS RECIENTES ({len(orders)} total):
-{[{'numero': o['order_number'], 'cliente': o['client_name'], 'total': o['total'], 'estado': o['status']} for o in orders[:10]]}
-
-Puedes ayudar al usuario a:
-- Buscar clientes, proveedores, productos, facturas
-- Crear nuevos registros (proporciona los datos en formato JSON)
-- Consultar información del sistema
-- Dar recomendaciones de negocio
-
-Responde siempre en español y de forma concisa.
+PEDIDOS:
+{[{"numero": item.order_number, "cliente": item.client_name, "total": item.total, "estado": item.status} for item in orders]}
 """
-    
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        
-        chat = LlmChat(
-            api_key=EMERGENT_LLM_KEY,
-            session_id=f"crm_{user['user_id']}",
-            system_message=context
-        )
-        chat.with_model("openai", "gpt-5.2")
-        
-        response = await chat.send_message(UserMessage(text=user_message))
-        
-        # Save assistant message
-        assistant_msg = ChatMessage(
-            user_id=user["user_id"],
-            company_id=user["company_id"],
-            role="assistant",
-            content=response
-        )
-        assistant_doc = assistant_msg.model_dump()
-        assistant_doc["created_at"] = assistant_doc["created_at"].isoformat()
-        await db.chat_messages.insert_one(assistant_doc)
-        
-        return {"response": response, "message_id": assistant_doc["message_id"]}
-    
-    except Exception as e:
-        logger.error(f"AI chat error: {str(e)}")
-        error_response = "Lo siento, hubo un error al procesar tu mensaje. Por favor intenta de nuevo."
-        return {"response": error_response, "error": str(e)}
 
-@api_router.delete("/ai/chat-history")
-async def clear_chat_history(request: Request):
-    user = await get_current_user(request)
-    await db.chat_messages.delete_many({"user_id": user["user_id"], "company_id": user["company_id"]})
+    try:
+        ai_response = await generate_ai_response(context, user_message)
+    except Exception as exc:
+        logger.error("AI chat error: %s", exc)
+        return {
+            "response": "No he podido procesar tu mensaje ahora mismo. Revisa la configuracion de OPENAI_API_KEY.",
+            "error": str(exc),
+        }
+
+    assistant_msg = ChatMessageModel(
+        message_id=prefixed_id("msg"),
+        user_id=user.user_id,
+        company_id=user.company_id,
+        role="assistant",
+        content=ai_response,
+    )
+    db.add(assistant_msg)
+    db.commit()
+
+    return {"response": ai_response, "message_id": assistant_msg.message_id}
+
+
+@app.delete("/api/ai/chat-history")
+def clear_chat_history(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
+    db.query(ChatMessageModel).filter(ChatMessageModel.user_id == user.user_id, ChatMessageModel.company_id == user.company_id).delete()
+    db.commit()
     return {"message": "Chat history cleared"}
 
-# ==================== ROOT ====================
 
-@api_router.get("/")
-async def root():
-    return {"message": "CRM API Running"}
+@app.get("/api")
+def root() -> Dict[str, str]:
+    return {"message": "Starxia ERP API Running"}
 
-app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
