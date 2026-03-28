@@ -8,8 +8,9 @@ import { useAuth } from "@/App";
 import { toast } from "sonner";
 import axios from "axios";
 import { Building2, User, Mail } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = API_BASE;
 
 const Settings = () => {
   const { user } = useAuth();

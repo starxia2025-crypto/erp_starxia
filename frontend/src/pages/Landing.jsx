@@ -10,11 +10,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
+import { API_BASE } from "@/lib/api";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = API_BASE;
 
 const initialLogin = { email: "", password: "" };
 const initialRegister = { name: "", email: "", password: "", company_name: "" };
+const authInputClassName =
+  "border-white/15 bg-white/5 text-white placeholder:text-zinc-500 caret-white autofill:bg-transparent";
 
 const features = [
   {
@@ -135,24 +138,26 @@ const Landing = () => {
                 <TabsContent value="login">
                   <form className="space-y-4" onSubmit={handleLogin}>
                     <div className="space-y-2">
-                      <Label htmlFor="login-email">Email</Label>
+                      <Label htmlFor="login-email" className="text-zinc-200">Email</Label>
                       <Input
                         id="login-email"
                         type="email"
                         value={loginForm.email}
                         onChange={(event) => setLoginForm({ ...loginForm, email: event.target.value })}
                         placeholder="admin@tuempresa.com"
+                        className={authInputClassName}
                         required
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="login-password">Contrasena</Label>
+                      <Label htmlFor="login-password" className="text-zinc-200">Contrasena</Label>
                       <Input
                         id="login-password"
                         type="password"
                         value={loginForm.password}
                         onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })}
                         placeholder="Tu contrasena"
+                        className={authInputClassName}
                         required
                       />
                     </div>
@@ -165,38 +170,41 @@ const Landing = () => {
                 <TabsContent value="register">
                   <form className="space-y-4" onSubmit={handleRegister}>
                     <div className="space-y-2">
-                      <Label htmlFor="register-company">Empresa</Label>
+                      <Label htmlFor="register-company" className="text-zinc-200">Empresa</Label>
                       <Input
                         id="register-company"
                         value={registerForm.company_name}
                         onChange={(event) => setRegisterForm({ ...registerForm, company_name: event.target.value })}
                         placeholder="Starxia Operations"
+                        className={authInputClassName}
                         required
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="register-name">Nombre</Label>
+                      <Label htmlFor="register-name" className="text-zinc-200">Nombre</Label>
                       <Input
                         id="register-name"
                         value={registerForm.name}
                         onChange={(event) => setRegisterForm({ ...registerForm, name: event.target.value })}
                         placeholder="Tu nombre"
+                        className={authInputClassName}
                         required
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="register-email">Email</Label>
+                      <Label htmlFor="register-email" className="text-zinc-200">Email</Label>
                       <Input
                         id="register-email"
                         type="email"
                         value={registerForm.email}
                         onChange={(event) => setRegisterForm({ ...registerForm, email: event.target.value })}
                         placeholder="admin@tuempresa.com"
+                        className={authInputClassName}
                         required
                       />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="register-password">Contrasena</Label>
+                      <Label htmlFor="register-password" className="text-zinc-200">Contrasena</Label>
                       <Input
                         id="register-password"
                         type="password"
@@ -204,6 +212,7 @@ const Landing = () => {
                         value={registerForm.password}
                         onChange={(event) => setRegisterForm({ ...registerForm, password: event.target.value })}
                         placeholder="Minimo 8 caracteres"
+                        className={authInputClassName}
                         required
                       />
                     </div>

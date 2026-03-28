@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useEffect, useState, createContext, useContext, useCallback } from "react";
 import axios from "axios";
 import { Toaster } from "@/components/ui/sonner";
+import { API_BASE } from "@/lib/api";
 
 // Pages
 import Landing from "@/pages/Landing";
@@ -23,8 +24,7 @@ import Reports from "@/pages/Reports";
 import Settings from "@/pages/Settings";
 import AIAssistant from "@/pages/AIAssistant";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+const API = API_BASE;
 
 // Auth Context
 const AuthContext = createContext(null);

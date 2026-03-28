@@ -21,8 +21,9 @@ import { Label } from "@/components/ui/label";
 import { Plus, Search, Edit, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
+import { API_BASE } from "@/lib/api";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = API_BASE;
 
 const Products = () => {
   const [products, setProducts] = useState([]);

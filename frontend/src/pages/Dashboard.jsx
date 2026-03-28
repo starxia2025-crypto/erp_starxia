@@ -12,8 +12,9 @@ import {
   DollarSign
 } from "lucide-react";
 import axios from "axios";
+import { API_BASE } from "@/lib/api";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = API_BASE;
 
 const Dashboard = () => {
   const [stats, setStats] = useState(null);

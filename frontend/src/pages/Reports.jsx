@@ -13,8 +13,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
+import { API_BASE } from "@/lib/api";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = API_BASE;
 
 const Reports = () => {
   const [exporting, setExporting] = useState(null);

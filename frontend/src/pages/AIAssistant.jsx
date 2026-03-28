@@ -7,8 +7,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Send, Bot, User, Trash2, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
+import { API_BASE } from "@/lib/api";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+const API = API_BASE;
 
 const AIAssistant = () => {
   const [messages, setMessages] = useState([]);
