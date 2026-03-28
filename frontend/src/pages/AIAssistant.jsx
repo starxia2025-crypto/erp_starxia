@@ -41,13 +41,12 @@ const AIAssistant = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!input.trim() || loading) return;
+  const sendMessage = async (rawMessage) => {
+    const userMessage = rawMessage.trim();
+    if (!userMessage || loading) return;
 
-    const userMessage = input.trim();
     setInput("");
-    
+
     // Add user message optimistically
     setMessages(prev => [...prev, {
       message_id: `temp_${Date.now()}`,
@@ -74,6 +73,11 @@ const AIAssistant = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    await sendMessage(input);
   };
 
   const handleClearHistory = async () => {
@@ -135,7 +139,7 @@ const AIAssistant = () => {
                         variant="outline"
                         size="sm"
                         className="text-xs"
-                        onClick={() => setInput(question)}
+                        onClick={() => sendMessage(question)}
                         data-testid={`suggested-${index}`}
                       >
                         {question}

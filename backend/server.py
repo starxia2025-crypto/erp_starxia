@@ -525,7 +525,7 @@ def clean_json_response(raw: str) -> str:
     return cleaned.strip()
 
 
-async def extract_erp_action(user_message: str) -> Optional[Dict[str, Any]]:
+async def extract_erp_action(user_message: str, recent_history_text: str = "") -> Optional[Dict[str, Any]]:
     if not openai_client:
         return None
 
@@ -541,15 +541,21 @@ async def extract_erp_action(user_message: str) -> Optional[Dict[str, Any]]:
                             "Convierte la peticion del usuario en JSON puro para un ERP. "
                             "No expliques nada, devuelve solo JSON. "
                             'Formato: {"intent":"create|update|delete|read|unknown","entity":"client|supplier|product|warehouse|unknown","lookup":{},"data":{}}. '
-                            "Rellena solo campos explicitamente pedidos o inferidos de forma muy obvia. "
-                            "Si falta informacion critica para crear o editar, deja los campos faltantes fuera."
-                        ),
-                    }
-                ],
-            },
-            {"role": "user", "content": [{"type": "input_text", "text": user_message}]},
-        ],
-    )
+                              "Rellena solo campos explicitamente pedidos o inferidos de forma muy obvia. "
+                              "Ten en cuenta el historial reciente si el usuario usa referencias como 'ese cliente', "
+                              "'el anterior' o 'cambiale'. "
+                              "Si falta informacion critica para crear o editar, deja los campos faltantes fuera."
+                          ),
+                      }
+                  ],
+              },
+              {
+                  "role": "system",
+                  "content": [{"type": "input_text", "text": f"Historial reciente:\n{recent_history_text}"}],
+              },
+              {"role": "user", "content": [{"type": "input_text", "text": user_message}]},
+          ],
+      )
     try:
         return json.loads(clean_json_response(response.output_text))
     except json.JSONDecodeError:
@@ -1503,9 +1509,10 @@ async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_curre
         for item in reversed(recent_history)
         if item.message_id != user_msg.message_id
     ]
+    history_text = "\n".join(history_lines) if history_lines else "Sin historial previo relevante."
 
     if is_write_intent(user_message):
-        action = await extract_erp_action(user_message)
+        action = await extract_erp_action(user_message, history_text)
         ai_response = execute_ai_write_action(action or {}, user, db) or (
             "He detectado una intencion de escritura, pero no he podido interpretar la accion con suficiente claridad. "
             "Pidemelo indicando la entidad y los campos, por ejemplo: crea el cliente Ana con email ana@empresa.com."
@@ -1530,7 +1537,7 @@ async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_curre
     context = f"""
 Eres un asistente de IA para un ERP. Responde siempre en espanol y de forma concisa.
 IMPORTANTE:
-- Solo tienes permisos de lectura en esta parte conversacional.
+  - Solo tienes permisos de lectura en esta parte conversacional.
   - Las altas y ediciones reales se ejecutan fuera de esta respuesta mediante acciones backend.
   - Nunca afirmes que has creado, actualizado o eliminado algo salvo que el backend ya lo haya ejecutado antes de generar esta respuesta.
   - No propongas borrar datos ni sugieras que se ha hecho una eliminacion.
@@ -1538,7 +1545,7 @@ IMPORTANTE:
   - Ten en cuenta el historial reciente para mantener el hilo de la conversacion.
 
   HISTORIAL RECIENTE:
-  {history_lines}
+  {history_text}
   
   CLIENTES:
   {[{"nombre": item.name, "email": item.email, "id": item.client_id} for item in clients]}
