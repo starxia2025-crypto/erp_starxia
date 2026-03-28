@@ -25,6 +25,7 @@ SMTP_PASSWORD=tu-password-smtp
 SMTP_FROM_EMAIL=no-reply@tudominio.com
 SMTP_FROM_NAME=Starxia ERP
 SMTP_USE_TLS=true
+SMTP_USE_SSL=false
 CORS_ORIGINS=https://app.tudominio.com,https://tudominio.com
 COOKIE_SECURE=true
 COOKIE_SAMESITE=lax
@@ -66,6 +67,8 @@ ENABLE_HEALTH_CHECK=false
 - El backend crea las tablas globales en `public` al arrancar por primera vez.
 - Cada nueva empresa crea automaticamente su propio schema aislado en Postgres y un almacen principal.
 - Si activas recuperacion de contrasena, configura tambien las variables SMTP y `PASSWORD_RESET_BASE_URL`.
+- Para SMTP con puerto `587`, usa `SMTP_USE_TLS=true` y `SMTP_USE_SSL=false`.
+- Para SMTP con puerto `465`, usa `SMTP_USE_TLS=false` y `SMTP_USE_SSL=true`.
 - Si quieres usar el dominio raiz para la app, ajusta `CORS_ORIGINS` para incluirlo.
 - Si trabajas con HTTPS, deja `COOKIE_SECURE=true`.
 - Si haces pruebas en local con HTTP, usa `COOKIE_SECURE=false`.

@@ -40,6 +40,7 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", "")
 SMTP_FROM_NAME = os.environ.get("SMTP_FROM_NAME", "Starxia ERP")
 SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() == "true"
+SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "false").lower() == "true"
 CORS_ORIGINS = [
     origin.strip()
     for origin in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
@@ -493,12 +494,21 @@ def send_email_message(to_email: str, subject: str, body: str) -> None:
     message["To"] = to_email
     message.set_content(body)
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
-        if SMTP_USE_TLS:
-            smtp.starttls()
-        if SMTP_USERNAME:
-            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
-        smtp.send_message(message)
+    try:
+        if SMTP_USE_SSL:
+            smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20)
+        else:
+            smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+
+        with smtp:
+            if SMTP_USE_TLS and not SMTP_USE_SSL:
+                smtp.starttls()
+            if SMTP_USERNAME:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.send_message(message)
+    except Exception as exc:
+        logger.exception("SMTP send failed")
+        raise RuntimeError("Could not send email") from exc
 
 
 def send_password_reset_email(user: UserModel) -> None:
