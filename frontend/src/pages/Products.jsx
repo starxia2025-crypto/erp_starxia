@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
+import axios from "axios";
+import { Edit, Plus, Search, Trash2, Upload } from "lucide-react";
+import { toast } from "sonner";
+
 import Layout from "@/components/layout/Layout";
+import { API_BASE } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
@@ -10,6 +14,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -17,11 +23,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Label } from "@/components/ui/label";
-import { Plus, Search, Edit, Trash2, Upload } from "lucide-react";
-import { toast } from "sonner";
-import axios from "axios";
-import { API_BASE } from "@/lib/api";
 
 const API = API_BASE;
 
@@ -39,7 +40,7 @@ const Products = () => {
     description: "",
     price: "",
     cost: "",
-    type_id: ""
+    type_id: "",
   });
 
   useEffect(() => {
@@ -63,31 +64,32 @@ const Products = () => {
       const response = await axios.get(`${API}/product-types`, { withCredentials: true });
       setProductTypes(response.data);
     } catch (error) {
-      console.error("Error fetching product types:", error);
+      toast.error("Error al cargar tipos de producto");
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleSubmit = async (event) => {
+    event.preventDefault();
     try {
-      const data = {
+      const payload = {
         ...formData,
         price: parseFloat(formData.price) || 0,
-        cost: parseFloat(formData.cost) || 0
+        cost: parseFloat(formData.cost) || 0,
       };
-      
+
       if (editingProduct) {
-        await axios.put(`${API}/products/${editingProduct.product_id}`, data, { withCredentials: true });
+        await axios.put(`${API}/products/${editingProduct.product_id}`, payload, { withCredentials: true });
         toast.success("Producto actualizado");
       } else {
-        await axios.post(`${API}/products`, data, { withCredentials: true });
+        await axios.post(`${API}/products`, payload, { withCredentials: true });
         toast.success("Producto creado");
       }
+
       setDialogOpen(false);
       resetForm();
       fetchProducts();
     } catch (error) {
-      toast.error("Error al guardar producto");
+      toast.error(error.response?.data?.detail || "Error al guardar producto");
     }
   };
 
@@ -99,72 +101,82 @@ const Products = () => {
       description: product.description || "",
       price: product.price?.toString() || "",
       cost: product.cost?.toString() || "",
-      type_id: product.type_id || ""
+      type_id: product.type_id || "",
     });
     setDialogOpen(true);
   };
 
   const handleDelete = async (productId) => {
-    if (window.confirm("¿Estás seguro de eliminar este producto?")) {
-      try {
-        await axios.delete(`${API}/products/${productId}`, { withCredentials: true });
-        toast.success("Producto eliminado");
-        fetchProducts();
-      } catch (error) {
-        toast.error("Error al eliminar producto");
-      }
+    if (!window.confirm("Estas seguro de eliminar este producto?")) return;
+    try {
+      await axios.delete(`${API}/products/${productId}`, { withCredentials: true });
+      toast.success("Producto eliminado");
+      fetchProducts();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Error al eliminar producto");
     }
   };
 
-  const handleImportCSV = async (e) => {
-    const file = e.target.files[0];
+  const handleImportCSV = async (event) => {
+    const file = event.target.files[0];
     if (!file) return;
 
-    const formData = new FormData();
-    formData.append("file", file);
+    const payload = new FormData();
+    payload.append("file", file);
 
     try {
-      const response = await axios.post(`${API}/products/import-csv`, formData, {
+      const response = await axios.post(`${API}/products/import-csv`, payload, {
         withCredentials: true,
-        headers: { "Content-Type": "multipart/form-data" }
+        headers: { "Content-Type": "multipart/form-data" },
       });
       toast.success(response.data.message);
       setImportDialogOpen(false);
       fetchProducts();
     } catch (error) {
-      toast.error("Error al importar CSV");
+      toast.error(error.response?.data?.detail || "Error al importar CSV");
     }
   };
 
   const resetForm = () => {
     setEditingProduct(null);
-    setFormData({ sku: "", name: "", description: "", price: "", cost: "", type_id: "" });
+    setFormData({
+      sku: "",
+      name: "",
+      description: "",
+      price: "",
+      cost: "",
+      type_id: "",
+    });
   };
 
-  const filteredProducts = products.filter(product =>
-    product.name?.toLowerCase().includes(search.toLowerCase()) ||
-    product.sku?.toLowerCase().includes(search.toLowerCase())
-  );
-
   const getTypeName = (typeId) => {
-    const type = productTypes.find(t => t.type_id === typeId);
+    const type = productTypes.find((item) => item.type_id === typeId);
     return type?.name || "-";
   };
 
-  const formatCurrency = (value) => {
-    return new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(value || 0);
+  const formatCurrency = (value) =>
+    new Intl.NumberFormat("es-ES", { style: "currency", currency: "EUR" }).format(value || 0);
+
+  const formatStockBreakdown = (product) => {
+    if (!product.stock_by_warehouse?.length) return "Sin stock cargado";
+    return product.stock_by_warehouse.map((line) => `${line.warehouse_name}: ${line.quantity}`).join(" | ");
   };
 
+  const filteredProducts = products.filter((product) => {
+    const value = search.toLowerCase();
+    return product.name?.toLowerCase().includes(value) || product.sku?.toLowerCase().includes(value);
+  });
+
   return (
-    <Layout title="Gestión de Productos">
+    <Layout title="Gestion de productos">
       <div className="space-y-6" data-testid="products-page">
-        <div className="flex flex-col sm:flex-row gap-4 justify-between">
-          <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+        <div className="flex flex-col justify-between gap-4 sm:flex-row">
+          <div className="relative max-w-md flex-1">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 transform text-muted-foreground" />
             <Input
               placeholder="Buscar productos..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(event) => setSearch(event.target.value)}
               className="pl-10"
               data-testid="search-products"
             />
@@ -173,105 +185,105 @@ const Products = () => {
             <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
               <DialogTrigger asChild>
                 <Button variant="outline" data-testid="import-csv-btn">
-                  <Upload className="w-4 h-4 mr-2" />
+                  <Upload className="mr-2 h-4 w-4" />
                   Importar CSV
                 </Button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Importar Productos desde CSV</DialogTitle>
+                  <DialogTitle>Importar productos desde CSV</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4">
                   <p className="text-sm text-muted-foreground">
                     El archivo CSV debe tener las columnas: sku, name, description, price, cost
                   </p>
-                  <Input
-                    type="file"
-                    accept=".csv"
-                    onChange={handleImportCSV}
-                    data-testid="csv-file-input"
-                  />
+                  <Input type="file" accept=".csv" onChange={handleImportCSV} data-testid="csv-file-input" />
                 </div>
               </DialogContent>
             </Dialog>
+
             <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
               <DialogTrigger asChild>
                 <Button data-testid="add-product-btn">
-                  <Plus className="w-4 h-4 mr-2" />
-                  Nuevo Producto
+                  <Plus className="mr-2 h-4 w-4" />
+                  Nuevo producto
                 </Button>
               </DialogTrigger>
               <DialogContent className="max-w-md">
                 <DialogHeader>
-                  <DialogTitle>{editingProduct ? "Editar Producto" : "Nuevo Producto"}</DialogTitle>
+                  <DialogTitle>{editingProduct ? "Editar producto" : "Nuevo producto"}</DialogTitle>
                 </DialogHeader>
                 <form onSubmit={handleSubmit} className="space-y-4">
                   <div>
-                    <Label htmlFor="sku">SKU *</Label>
+                    <Label htmlFor="product-sku">SKU</Label>
                     <Input
-                      id="sku"
+                      id="product-sku"
                       value={formData.sku}
-                      onChange={(e) => setFormData({ ...formData, sku: e.target.value })}
+                      onChange={(event) => setFormData({ ...formData, sku: event.target.value })}
                       required
                       data-testid="product-sku-input"
                     />
                   </div>
                   <div>
-                    <Label htmlFor="name">Nombre *</Label>
+                    <Label htmlFor="product-name">Nombre</Label>
                     <Input
-                      id="name"
+                      id="product-name"
                       value={formData.name}
-                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                      onChange={(event) => setFormData({ ...formData, name: event.target.value })}
                       required
                       data-testid="product-name-input"
                     />
                   </div>
                   <div>
-                    <Label htmlFor="description">Descripción</Label>
+                    <Label htmlFor="product-description">Descripcion</Label>
                     <Input
-                      id="description"
+                      id="product-description"
                       value={formData.description}
-                      onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                      onChange={(event) => setFormData({ ...formData, description: event.target.value })}
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <Label htmlFor="price">Precio Venta</Label>
+                      <Label htmlFor="product-cost">Coste</Label>
                       <Input
-                        id="price"
-                        type="number"
-                        step="0.01"
-                        value={formData.price}
-                        onChange={(e) => setFormData({ ...formData, price: e.target.value })}
-                        data-testid="product-price-input"
-                      />
-                    </div>
-                    <div>
-                      <Label htmlFor="cost">Coste</Label>
-                      <Input
-                        id="cost"
+                        id="product-cost"
                         type="number"
                         step="0.01"
                         value={formData.cost}
-                        onChange={(e) => setFormData({ ...formData, cost: e.target.value })}
+                        onChange={(event) => setFormData({ ...formData, cost: event.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="product-price">Precio venta</Label>
+                      <Input
+                        id="product-price"
+                        type="number"
+                        step="0.01"
+                        value={formData.price}
+                        onChange={(event) => setFormData({ ...formData, price: event.target.value })}
+                        data-testid="product-price-input"
                       />
                     </div>
                   </div>
                   <div>
-                    <Label htmlFor="type_id">Tipo de Producto</Label>
+                    <Label htmlFor="product-type">Tipo de producto</Label>
                     <Select value={formData.type_id} onValueChange={(value) => setFormData({ ...formData, type_id: value })}>
-                      <SelectTrigger>
+                      <SelectTrigger id="product-type">
                         <SelectValue placeholder="Seleccionar tipo" />
                       </SelectTrigger>
                       <SelectContent>
                         {productTypes.map((type) => (
-                          <SelectItem key={type.type_id} value={type.type_id}>{type.name}</SelectItem>
+                          <SelectItem key={type.type_id} value={type.type_id}>
+                            {type.name}
+                          </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
                   <div className="flex justify-end gap-2 pt-4">
-                    <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancelar</Button>
+                    <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
+                      Cancelar
+                    </Button>
                     <Button type="submit" data-testid="save-product-btn">Guardar</Button>
                   </div>
                 </form>
@@ -283,8 +295,8 @@ const Products = () => {
         <Card>
           <CardContent className="p-0">
             {loading ? (
-              <div className="flex items-center justify-center h-32">
-                <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+              <div className="flex h-32 items-center justify-center">
+                <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
               </div>
             ) : filteredProducts.length > 0 ? (
               <div className="overflow-x-auto">
@@ -296,6 +308,8 @@ const Products = () => {
                       <th>Tipo</th>
                       <th className="text-right">Coste</th>
                       <th className="text-right">Precio</th>
+                      <th className="text-right">Stock total</th>
+                      <th>Existencias por almacen</th>
                       <th className="text-right">Acciones</th>
                     </tr>
                   </thead>
@@ -307,12 +321,14 @@ const Products = () => {
                         <td>{getTypeName(product.type_id)}</td>
                         <td className="text-right font-mono">{formatCurrency(product.cost)}</td>
                         <td className="text-right font-mono">{formatCurrency(product.price)}</td>
+                        <td className="text-right font-mono">{product.stock_total || 0}</td>
+                        <td className="max-w-[360px] text-sm text-muted-foreground">{formatStockBreakdown(product)}</td>
                         <td className="text-right">
                           <Button variant="ghost" size="icon" onClick={() => handleEdit(product)}>
-                            <Edit className="w-4 h-4" />
+                            <Edit className="h-4 w-4" />
                           </Button>
                           <Button variant="ghost" size="icon" onClick={() => handleDelete(product.product_id)}>
-                            <Trash2 className="w-4 h-4 text-destructive" />
+                            <Trash2 className="h-4 w-4 text-destructive" />
                           </Button>
                         </td>
                       </tr>
@@ -321,7 +337,7 @@ const Products = () => {
                 </table>
               </div>
             ) : (
-              <div className="text-center py-12 text-muted-foreground">
+              <div className="py-12 text-center text-muted-foreground">
                 <p>No hay productos registrados</p>
               </div>
             )}

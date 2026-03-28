@@ -584,6 +584,106 @@ def first_or_404(query, detail: str):
     return instance
 
 
+def get_default_warehouse(user: UserModel, db: Session) -> WarehouseModel:
+    warehouse = company_filter(db.query(WarehouseModel), WarehouseModel, user).order_by(WarehouseModel.created_at.asc()).first()
+    if not warehouse:
+        raise HTTPException(status_code=400, detail="No warehouse available")
+    return warehouse
+
+
+def resolve_warehouse_id(user: UserModel, db: Session, warehouse_id: Optional[str]) -> str:
+    if warehouse_id:
+        warehouse = company_filter(db.query(WarehouseModel), WarehouseModel, user).filter(WarehouseModel.warehouse_id == warehouse_id).first()
+        if not warehouse:
+            raise HTTPException(status_code=404, detail="Warehouse not found")
+        return warehouse.warehouse_id
+    return get_default_warehouse(user, db).warehouse_id
+
+
+def get_or_create_inventory_item(db: Session, user: UserModel, product_id: str, warehouse_id: str) -> InventoryModel:
+    item = company_filter(db.query(InventoryModel), InventoryModel, user).filter(
+        InventoryModel.product_id == product_id,
+        InventoryModel.warehouse_id == warehouse_id,
+    ).first()
+    if item:
+        return item
+
+    item = InventoryModel(
+        inventory_id=prefixed_id("inv"),
+        product_id=product_id,
+        warehouse_id=warehouse_id,
+        quantity=0,
+        min_stock=0,
+        company_id=user.company_id,
+    )
+    db.add(item)
+    db.flush()
+    return item
+
+
+def adjust_inventory_stock(
+    db: Session,
+    user: UserModel,
+    items: List[Dict[str, Any]],
+    warehouse_id: str,
+    movement: str,
+) -> None:
+    multiplier = 1 if movement == "in" else -1
+    for line in items:
+        product_id = line.get("product_id")
+        quantity = int(line.get("quantity", 0) or 0)
+        if not product_id or quantity <= 0:
+            continue
+
+        inventory_item = get_or_create_inventory_item(db, user, product_id, warehouse_id)
+        new_quantity = int(inventory_item.quantity or 0) + (quantity * multiplier)
+        if new_quantity < 0:
+            product = company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id).first()
+            product_name = product.name if product else product_id
+            raise HTTPException(status_code=400, detail=f"Stock insuficiente para {product_name} en el almacen seleccionado")
+        inventory_item.quantity = new_quantity
+        inventory_item.updated_at = datetime.now(timezone.utc)
+
+
+def enrich_products_with_inventory(products: List[ProductModel], user: UserModel, db: Session) -> List[Dict[str, Any]]:
+    product_ids = [product.product_id for product in products]
+    inventory_items = (
+        company_filter(db.query(InventoryModel), InventoryModel, user)
+        .filter(InventoryModel.product_id.in_(product_ids))
+        .all()
+        if product_ids
+        else []
+    )
+    warehouses = company_filter(db.query(WarehouseModel), WarehouseModel, user).all()
+    warehouse_names = {warehouse.warehouse_id: warehouse.name for warehouse in warehouses}
+    inventory_by_product: Dict[str, List[Dict[str, Any]]] = {}
+
+    for item in inventory_items:
+        inventory_by_product.setdefault(item.product_id, []).append(
+            {
+                "warehouse_id": item.warehouse_id,
+                "warehouse_name": warehouse_names.get(item.warehouse_id, item.warehouse_id),
+                "quantity": item.quantity,
+                "min_stock": item.min_stock,
+            }
+        )
+
+    enriched: List[Dict[str, Any]] = []
+    for product in products:
+        data = model_to_dict(product)
+        stock_lines = inventory_by_product.get(product.product_id, [])
+        data["stock_by_warehouse"] = stock_lines
+        data["stock_total"] = sum(line["quantity"] for line in stock_lines)
+        enriched.append(data)
+    return enriched
+
+
+def enrich_invoice_like(item: Any) -> Dict[str, Any]:
+    data = model_to_dict(item)
+    data["outstanding_amount"] = 0 if data.get("status") == "paid" else float(data.get("total") or 0)
+    return data
+
+
 def build_line_items(raw_items: List[Dict[str, Any]], products_by_id: Dict[str, ProductModel]) -> tuple[List[Dict[str, Any]], float]:
     items: List[Dict[str, Any]] = []
     subtotal = 0.0
@@ -1282,14 +1382,15 @@ def delete_product_type(type_id: str, user: UserModel = Depends(get_current_user
 @app.get("/api/products")
 def get_products(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     require_permission(user, "products.read")
-    return scoped_list(ProductModel, user, db)
+    products = company_filter(db.query(ProductModel), ProductModel, user).order_by(ProductModel.created_at.desc()).all()
+    return enrich_products_with_inventory(products, user, db)
 
 
 @app.get("/api/products/{product_id}")
 def get_product(product_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "products.read")
     item = first_or_404(company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id), "Product not found")
-    return model_to_dict(item)
+    return enrich_products_with_inventory([item], user, db)[0]
 
 
 @app.post("/api/products")
@@ -1308,7 +1409,7 @@ def create_product(data: Dict[str, Any], user: UserModel = Depends(get_current_u
     db.add(item)
     db.commit()
     db.refresh(item)
-    return model_to_dict(item)
+    return enrich_products_with_inventory([item], user, db)[0]
 
 
 @app.put("/api/products/{product_id}")
@@ -1320,7 +1421,7 @@ def update_product(product_id: str, data: Dict[str, Any], user: UserModel = Depe
             setattr(item, field, data[field])
     db.commit()
     db.refresh(item)
-    return model_to_dict(item)
+    return enrich_products_with_inventory([item], user, db)[0]
 
 
 @app.delete("/api/products/{product_id}")
@@ -1517,6 +1618,7 @@ def create_order(data: Dict[str, Any], user: UserModel = Depends(get_current_use
     products_by_id = lookup_products(db, user, data.get("items", []))
     items, subtotal = build_line_items(data.get("items", []), products_by_id)
     tax = subtotal * 0.21
+    warehouse_id = resolve_warehouse_id(user, db, data.get("warehouse_id"))
 
     item = OrderModel(
         order_id=prefixed_id("ord"),
@@ -1528,7 +1630,7 @@ def create_order(data: Dict[str, Any], user: UserModel = Depends(get_current_use
         tax=tax,
         total=subtotal + tax,
         status=data.get("status", "pending"),
-        warehouse_id=data.get("warehouse_id"),
+        warehouse_id=warehouse_id,
         company_id=user.company_id,
     )
     db.add(item)
@@ -1561,30 +1663,49 @@ def delete_order(order_id: str, user: UserModel = Depends(get_current_user), db:
 def get_invoices(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     require_permission(user, "sales.read")
     items = company_filter(db.query(InvoiceModel), InvoiceModel, user).order_by(InvoiceModel.created_at.desc()).all()
-    return [model_to_dict(item) for item in items]
+    return [enrich_invoice_like(item) for item in items]
 
 
 @app.get("/api/invoices/{invoice_id}")
 def get_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "sales.read")
     item = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
-    return model_to_dict(item)
+    return enrich_invoice_like(item)
 
 
 @app.post("/api/invoices")
 def create_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "sales.write")
-    client = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == data["client_id"]), "Client not found")
-    products_by_id = lookup_products(db, user, data.get("items", []))
-    items, subtotal = build_line_items(data.get("items", []), products_by_id)
+    source_order = None
+    if data.get("order_id"):
+        source_order = first_or_404(
+            company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == data["order_id"]),
+            "Order not found",
+        )
+        existing_invoice = company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.order_id == source_order.order_id).first()
+        if existing_invoice:
+            raise HTTPException(status_code=400, detail="This order is already linked to a sales invoice")
+
+    client_id = data.get("client_id") or (source_order.client_id if source_order else None)
+    if not client_id:
+        raise HTTPException(status_code=400, detail="Client is required")
+    client = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == client_id), "Client not found")
+
+    raw_items = data.get("items") or (source_order.items if source_order else [])
+    if not raw_items:
+        raise HTTPException(status_code=400, detail="Invoice must include at least one item")
+    products_by_id = lookup_products(db, user, raw_items)
+    items, subtotal = build_line_items(raw_items, products_by_id)
+    warehouse_id = resolve_warehouse_id(user, db, data.get("warehouse_id") or (source_order.warehouse_id if source_order else None))
     tax = subtotal * 0.21
+    adjust_inventory_stock(db, user, items, warehouse_id, movement="out")
 
     item = InvoiceModel(
         invoice_id=prefixed_id("inv"),
         invoice_number=generate_sequence("FAC", InvoiceModel, user.company_id, db),
         client_id=client.client_id,
         client_name=client.name,
-        order_id=data.get("order_id"),
+        order_id=source_order.order_id if source_order else data.get("order_id"),
         items=items,
         subtotal=subtotal,
         tax=tax,
@@ -1596,7 +1717,7 @@ def create_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_u
     db.add(item)
     db.commit()
     db.refresh(item)
-    return model_to_dict(item)
+    return enrich_invoice_like(item)
 
 
 @app.put("/api/invoices/{invoice_id}")
@@ -1611,7 +1732,7 @@ def update_invoice(invoice_id: str, data: Dict[str, Any], user: UserModel = Depe
         item.paid_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(item)
-    return model_to_dict(item)
+    return enrich_invoice_like(item)
 
 
 @app.delete("/api/invoices/{invoice_id}")
@@ -1636,6 +1757,7 @@ def create_purchase_order(data: Dict[str, Any], user: UserModel = Depends(get_cu
     products_by_id = lookup_products(db, user, data.get("items", []))
     items, subtotal = build_line_items(data.get("items", []), products_by_id)
     tax = subtotal * 0.21
+    warehouse_id = resolve_warehouse_id(user, db, data.get("warehouse_id"))
 
     item = PurchaseOrderModel(
         po_id=prefixed_id("po"),
@@ -1647,7 +1769,7 @@ def create_purchase_order(data: Dict[str, Any], user: UserModel = Depends(get_cu
         tax=tax,
         total=subtotal + tax,
         status=data.get("status", "pending"),
-        warehouse_id=data.get("warehouse_id"),
+        warehouse_id=warehouse_id,
         company_id=user.company_id,
     )
     db.add(item)
@@ -1680,23 +1802,42 @@ def delete_purchase_order(po_id: str, user: UserModel = Depends(get_current_user
 def get_purchase_invoices(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     require_permission(user, "purchases.read")
     items = company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).order_by(PurchaseInvoiceModel.created_at.desc()).all()
-    return [model_to_dict(item) for item in items]
+    return [enrich_invoice_like(item) for item in items]
 
 
 @app.post("/api/purchase-invoices")
 def create_purchase_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "purchases.write")
-    supplier = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == data["supplier_id"]), "Supplier not found")
-    products_by_id = lookup_products(db, user, data.get("items", []))
-    items, subtotal = build_line_items(data.get("items", []), products_by_id)
+    source_po = None
+    if data.get("po_id"):
+        source_po = first_or_404(
+            company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).filter(PurchaseOrderModel.po_id == data["po_id"]),
+            "Purchase order not found",
+        )
+        existing_purchase_invoice = company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.po_id == source_po.po_id).first()
+        if existing_purchase_invoice:
+            raise HTTPException(status_code=400, detail="This purchase order is already linked to a purchase invoice")
+
+    supplier_id = data.get("supplier_id") or (source_po.supplier_id if source_po else None)
+    if not supplier_id:
+        raise HTTPException(status_code=400, detail="Supplier is required")
+    supplier = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == supplier_id), "Supplier not found")
+
+    raw_items = data.get("items") or (source_po.items if source_po else [])
+    if not raw_items:
+        raise HTTPException(status_code=400, detail="Purchase invoice must include at least one item")
+    products_by_id = lookup_products(db, user, raw_items)
+    items, subtotal = build_line_items(raw_items, products_by_id)
+    warehouse_id = resolve_warehouse_id(user, db, data.get("warehouse_id") or (source_po.warehouse_id if source_po else None))
     tax = subtotal * 0.21
+    adjust_inventory_stock(db, user, items, warehouse_id, movement="in")
 
     item = PurchaseInvoiceModel(
         pinv_id=prefixed_id("pinv"),
         invoice_number=generate_sequence("FC", PurchaseInvoiceModel, user.company_id, db),
         supplier_id=supplier.supplier_id,
         supplier_name=supplier.name,
-        po_id=data.get("po_id"),
+        po_id=source_po.po_id if source_po else data.get("po_id"),
         items=items,
         subtotal=subtotal,
         tax=tax,
@@ -1708,7 +1849,7 @@ def create_purchase_invoice(data: Dict[str, Any], user: UserModel = Depends(get_
     db.add(item)
     db.commit()
     db.refresh(item)
-    return model_to_dict(item)
+    return enrich_invoice_like(item)
 
 
 @app.put("/api/purchase-invoices/{pinv_id}")
@@ -1723,7 +1864,7 @@ def update_purchase_invoice(pinv_id: str, data: Dict[str, Any], user: UserModel 
         item.paid_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(item)
-    return model_to_dict(item)
+    return enrich_invoice_like(item)
 
 
 @app.delete("/api/purchase-invoices/{pinv_id}")
