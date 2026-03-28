@@ -467,6 +467,30 @@ async def generate_ai_response(context: str, user_message: str) -> str:
 
 def is_write_intent(message: str) -> bool:
     normalized = message.lower()
+    read_starters = [
+        "cuantos",
+        "cuántos",
+        "cuantas",
+        "cuántas",
+        "muestrame",
+        "muéstrame",
+        "busca",
+        "dime",
+        "lista",
+        "ensename",
+        "enséñame",
+        "cuales",
+        "cuáles",
+        "tengo",
+        "hay",
+        "donde",
+        "dónde",
+        "que ",
+        "qué ",
+    ]
+    if any(normalized.startswith(prefix) for prefix in read_starters):
+        return False
+
     write_keywords = [
         "crea",
         "crear",
@@ -1467,6 +1491,19 @@ async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_curre
     db.add(user_msg)
     db.commit()
 
+    recent_history = (
+        db.query(ChatMessageModel)
+        .filter(ChatMessageModel.user_id == user.user_id, ChatMessageModel.company_id == user.company_id)
+        .order_by(ChatMessageModel.created_at.desc())
+        .limit(8)
+        .all()
+    )
+    history_lines = [
+        f"{item.role.upper()}: {item.content}"
+        for item in reversed(recent_history)
+        if item.message_id != user_msg.message_id
+    ]
+
     if is_write_intent(user_message):
         action = await extract_erp_action(user_message)
         ai_response = execute_ai_write_action(action or {}, user, db) or (
@@ -1494,13 +1531,17 @@ async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_curre
 Eres un asistente de IA para un ERP. Responde siempre en espanol y de forma concisa.
 IMPORTANTE:
 - Solo tienes permisos de lectura en esta parte conversacional.
-- Las altas y ediciones reales se ejecutan fuera de esta respuesta mediante acciones backend.
-- Nunca afirmes que has creado, actualizado o eliminado algo salvo que el backend ya lo haya ejecutado antes de generar esta respuesta.
-- No propongas borrar datos ni sugieras que se ha hecho una eliminacion.
-- Si no encuentras un dato en el contexto, dilo claramente.
+  - Las altas y ediciones reales se ejecutan fuera de esta respuesta mediante acciones backend.
+  - Nunca afirmes que has creado, actualizado o eliminado algo salvo que el backend ya lo haya ejecutado antes de generar esta respuesta.
+  - No propongas borrar datos ni sugieras que se ha hecho una eliminacion.
+  - Si no encuentras un dato en el contexto, dilo claramente.
+  - Ten en cuenta el historial reciente para mantener el hilo de la conversacion.
 
-CLIENTES:
-{[{"nombre": item.name, "email": item.email, "id": item.client_id} for item in clients]}
+  HISTORIAL RECIENTE:
+  {history_lines}
+  
+  CLIENTES:
+  {[{"nombre": item.name, "email": item.email, "id": item.client_id} for item in clients]}
 
 PROVEEDORES:
 {[{"nombre": item.name, "email": item.email, "id": item.supplier_id} for item in suppliers]}
