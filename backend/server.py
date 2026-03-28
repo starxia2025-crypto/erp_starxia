@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import logging
 import os
 import re
@@ -462,6 +463,233 @@ async def generate_ai_response(context: str, user_message: str) -> str:
         ],
     )
     return response.output_text
+
+
+def is_write_intent(message: str) -> bool:
+    normalized = message.lower()
+    write_keywords = [
+        "crea",
+        "crear",
+        "creame",
+        "créame",
+        "registra",
+        "registrar",
+        "añade",
+        "anade",
+        "agrega",
+        "modifica",
+        "editar",
+        "edita",
+        "actualiza",
+        "borra",
+        "elimina",
+        "genera un cliente",
+        "crea un cliente",
+        "crea el cliente",
+        "crea una factura",
+        "crea un pedido",
+    ]
+    return any(keyword in normalized for keyword in write_keywords)
+
+
+def clean_json_response(raw: str) -> str:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+    return cleaned.strip()
+
+
+async def extract_erp_action(user_message: str) -> Optional[Dict[str, Any]]:
+    if not openai_client:
+        return None
+
+    response = await openai_client.responses.create(
+        model=OPENAI_MODEL,
+        input=[
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Convierte la peticion del usuario en JSON puro para un ERP. "
+                            "No expliques nada, devuelve solo JSON. "
+                            'Formato: {"intent":"create|update|delete|read|unknown","entity":"client|supplier|product|warehouse|unknown","lookup":{},"data":{}}. '
+                            "Rellena solo campos explicitamente pedidos o inferidos de forma muy obvia. "
+                            "Si falta informacion critica para crear o editar, deja los campos faltantes fuera."
+                        ),
+                    }
+                ],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": user_message}]},
+        ],
+    )
+    try:
+        return json.loads(clean_json_response(response.output_text))
+    except json.JSONDecodeError:
+        logger.warning("Could not parse action JSON from AI: %s", response.output_text)
+        return None
+
+
+def normalize_value(value: Any) -> Any:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        return stripped
+    return value
+
+
+def get_lookup_candidates(query, field, value):
+    return query.filter(field == value).all()
+
+
+def resolve_entity_instance(db: Session, model: Any, id_field_name: str, user: UserModel, lookup: Dict[str, Any], extra_fields: List[str]):
+    query = company_filter(db.query(model), model, user)
+    record_id = normalize_value(lookup.get(id_field_name))
+    if record_id:
+        return query.filter(getattr(model, id_field_name) == record_id).first()
+
+    for field_name in extra_fields:
+        field_value = normalize_value(lookup.get(field_name))
+        if field_value:
+            results = get_lookup_candidates(query, getattr(model, field_name), field_value)
+            if len(results) == 1:
+                return results[0]
+            if len(results) > 1:
+                raise HTTPException(status_code=400, detail=f"Multiple {model.__tablename__} match {field_name}")
+    return None
+
+
+def execute_ai_write_action(action: Dict[str, Any], user: UserModel, db: Session) -> Optional[str]:
+    intent = action.get("intent")
+    entity = action.get("entity")
+    lookup = action.get("lookup") or {}
+    data = {key: normalize_value(value) for key, value in (action.get("data") or {}).items()}
+
+    if intent == "delete":
+        return "No tengo permiso para eliminar datos desde el asistente IA."
+
+    if intent not in {"create", "update"}:
+        return None
+
+    if entity == "client":
+        if intent == "create":
+            if not data.get("name"):
+                return "Puedo crear el cliente, pero me falta al menos el nombre."
+            item = ClientModel(
+                client_id=prefixed_id("cli"),
+                name=data["name"],
+                email=data.get("email"),
+                phone=data.get("phone"),
+                address=data.get("address"),
+                tax_id=data.get("tax_id"),
+                type_id=data.get("type_id"),
+                balance=float(data.get("balance", 0) or 0),
+                company_id=user.company_id,
+            )
+            db.add(item)
+            db.commit()
+            db.refresh(item)
+            return f"Cliente creado: nombre={item.name}, email={item.email or '-'}, id={item.client_id}"
+
+        item = resolve_entity_instance(db, ClientModel, "client_id", user, lookup, ["email", "name"])
+        if not item:
+            return "No he encontrado un cliente unico para actualizar."
+        for field in ["name", "email", "phone", "address", "tax_id", "type_id", "balance"]:
+            if field in data and data[field] is not None:
+                setattr(item, field, float(data[field]) if field == "balance" else data[field])
+        db.commit()
+        db.refresh(item)
+        return f"Cliente actualizado: nombre={item.name}, email={item.email or '-'}, id={item.client_id}"
+
+    if entity == "supplier":
+        if intent == "create":
+            if not data.get("name"):
+                return "Puedo crear el proveedor, pero me falta al menos el nombre."
+            item = SupplierModel(
+                supplier_id=prefixed_id("sup"),
+                name=data["name"],
+                email=data.get("email"),
+                phone=data.get("phone"),
+                address=data.get("address"),
+                tax_id=data.get("tax_id"),
+                type_id=data.get("type_id"),
+                balance=float(data.get("balance", 0) or 0),
+                company_id=user.company_id,
+            )
+            db.add(item)
+            db.commit()
+            db.refresh(item)
+            return f"Proveedor creado: nombre={item.name}, email={item.email or '-'}, id={item.supplier_id}"
+
+        item = resolve_entity_instance(db, SupplierModel, "supplier_id", user, lookup, ["email", "name"])
+        if not item:
+            return "No he encontrado un proveedor unico para actualizar."
+        for field in ["name", "email", "phone", "address", "tax_id", "type_id", "balance"]:
+            if field in data and data[field] is not None:
+                setattr(item, field, float(data[field]) if field == "balance" else data[field])
+        db.commit()
+        db.refresh(item)
+        return f"Proveedor actualizado: nombre={item.name}, email={item.email or '-'}, id={item.supplier_id}"
+
+    if entity == "product":
+        if intent == "create":
+            if not data.get("name") or not data.get("sku"):
+                return "Puedo crear el producto, pero me faltan al menos nombre y SKU."
+            item = ProductModel(
+                product_id=prefixed_id("prod"),
+                sku=data["sku"],
+                name=data["name"],
+                description=data.get("description"),
+                price=float(data.get("price", 0) or 0),
+                cost=float(data.get("cost", 0) or 0),
+                type_id=data.get("type_id"),
+                company_id=user.company_id,
+            )
+            db.add(item)
+            db.commit()
+            db.refresh(item)
+            return f"Producto creado: nombre={item.name}, sku={item.sku}, id={item.product_id}"
+
+        item = resolve_entity_instance(db, ProductModel, "product_id", user, lookup, ["sku", "name"])
+        if not item:
+            return "No he encontrado un producto unico para actualizar."
+        for field in ["sku", "name", "description", "price", "cost", "type_id"]:
+            if field in data and data[field] is not None:
+                setattr(item, field, float(data[field]) if field in {"price", "cost"} else data[field])
+        db.commit()
+        db.refresh(item)
+        return f"Producto actualizado: nombre={item.name}, sku={item.sku}, id={item.product_id}"
+
+    if entity == "warehouse":
+        if intent == "create":
+            if not data.get("name"):
+                return "Puedo crear el almacen, pero me falta al menos el nombre."
+            item = WarehouseModel(
+                warehouse_id=prefixed_id("wh"),
+                name=data["name"],
+                address=data.get("address"),
+                company_id=user.company_id,
+            )
+            db.add(item)
+            db.commit()
+            db.refresh(item)
+            return f"Almacen creado: nombre={item.name}, id={item.warehouse_id}"
+
+        item = resolve_entity_instance(db, WarehouseModel, "warehouse_id", user, lookup, ["name"])
+        if not item:
+            return "No he encontrado un almacen unico para actualizar."
+        for field in ["name", "address"]:
+            if field in data and data[field] is not None:
+                setattr(item, field, data[field])
+        db.commit()
+        db.refresh(item)
+        return f"Almacen actualizado: nombre={item.name}, id={item.warehouse_id}"
+
+    return "Todavia no puedo escribir ese tipo de entidad desde el asistente IA. Ahora mismo soporto clientes, proveedores, productos y almacenes."
 
 
 @app.on_event("startup")
@@ -1239,6 +1467,23 @@ async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_curre
     db.add(user_msg)
     db.commit()
 
+    if is_write_intent(user_message):
+        action = await extract_erp_action(user_message)
+        ai_response = execute_ai_write_action(action or {}, user, db) or (
+            "He detectado una intencion de escritura, pero no he podido interpretar la accion con suficiente claridad. "
+            "Pidemelo indicando la entidad y los campos, por ejemplo: crea el cliente Ana con email ana@empresa.com."
+        )
+        assistant_msg = ChatMessageModel(
+            message_id=prefixed_id("msg"),
+            user_id=user.user_id,
+            company_id=user.company_id,
+            role="assistant",
+            content=ai_response,
+        )
+        db.add(assistant_msg)
+        db.commit()
+        return {"response": ai_response, "message_id": assistant_msg.message_id}
+
     clients = company_filter(db.query(ClientModel), ClientModel, user).limit(20).all()
     suppliers = company_filter(db.query(SupplierModel), SupplierModel, user).limit(20).all()
     products = company_filter(db.query(ProductModel), ProductModel, user).limit(20).all()
@@ -1247,6 +1492,12 @@ async def chat_with_ai(data: Dict[str, Any], user: UserModel = Depends(get_curre
 
     context = f"""
 Eres un asistente de IA para un ERP. Responde siempre en espanol y de forma concisa.
+IMPORTANTE:
+- Solo tienes permisos de lectura en esta parte conversacional.
+- Las altas y ediciones reales se ejecutan fuera de esta respuesta mediante acciones backend.
+- Nunca afirmes que has creado, actualizado o eliminado algo salvo que el backend ya lo haya ejecutado antes de generar esta respuesta.
+- No propongas borrar datos ni sugieras que se ha hecho una eliminacion.
+- Si no encuentras un dato en el contexto, dilo claramente.
 
 CLIENTES:
 {[{"nombre": item.name, "email": item.email, "id": item.client_id} for item in clients]}
