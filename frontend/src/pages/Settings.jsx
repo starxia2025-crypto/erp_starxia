@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
-import { Building2, FileText, Mail, Shield, User, Users } from "lucide-react";
+import { Building2, FileText, Mail, Moon, Shield, Sun, User, Users } from "lucide-react";
 
 import Layout from "@/components/layout/Layout";
-import { useAuth } from "@/App";
+import { useAuth, useTheme } from "@/App";
 import { API_BASE } from "@/lib/api";
 import { hasPermission } from "@/lib/permissions";
 import { toast } from "sonner";
@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -119,6 +120,7 @@ const getUploadErrorMessage = (error, fallback) =>
 
 const Settings = () => {
   const { user, setUser, checkAuth } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const canEditCompany = hasPermission(user, "settings.write");
   const canViewUsers = hasPermission(user, "users.read");
   const canManageUsers = hasPermission(user, "users.write");
@@ -579,6 +581,22 @@ const Settings = () => {
                 <Label className="text-muted-foreground">Rol</Label>
                 <div className="mt-1">
                   <Badge variant={getRoleBadgeVariant(user?.role)}>{roleLabelByValue[user?.role] || user?.role}</Badge>
+                </div>
+              </div>
+              <div className="space-y-3 md:col-span-4">
+                <Label className="text-muted-foreground">Apariencia</Label>
+                <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border bg-muted/20 px-4 py-3">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">Tema del panel</p>
+                    <p className="text-sm text-muted-foreground">
+                      Cambia entre modo oscuro y claro. El sistema se abre por defecto en oscuro.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 rounded-full border border-border bg-card px-3 py-2 shadow-sm">
+                    <Moon className={`h-4 w-4 ${theme === "dark" ? "text-primary" : "text-muted-foreground"}`} />
+                    <Switch checked={theme === "dark"} onCheckedChange={toggleTheme} aria-label="Cambiar entre tema oscuro y claro" />
+                    <Sun className={`h-4 w-4 ${theme === "light" ? "text-primary" : "text-muted-foreground"}`} />
+                  </div>
                 </div>
               </div>
             </div>

@@ -184,7 +184,8 @@ const Landing = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className={`flex min-h-screen flex-col overflow-x-hidden ${isDark ? "bg-[#111114]" : "bg-background"}`}>
+      <div className="flex-1">
       <div className="relative overflow-hidden border-b border-border">
         <div
           className={`absolute inset-0 ${
@@ -477,6 +478,7 @@ const Landing = () => {
             </CardContent>
           </Card>
         </div>
+      </div>
       </div>
       <LegalFooter />
     </div>

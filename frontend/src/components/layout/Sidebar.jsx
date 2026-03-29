@@ -70,7 +70,7 @@ const Sidebar = ({ currentPath }) => {
             type="button"
             variant="outline"
             size="icon"
-            className="shrink-0 rounded-full border-border/70 bg-background/70 shadow-sm transition-all hover:shadow-md"
+            className="shrink-0 rounded-full border-border bg-card text-foreground shadow-sm transition-all hover:bg-accent hover:text-accent-foreground hover:shadow-md focus-visible:ring-2 focus-visible:ring-primary"
             onClick={toggleTheme}
             aria-label={theme === "dark" ? "Cambiar a tema claro" : "Cambiar a tema oscuro"}
             title={theme === "dark" ? "Cambiar a tema claro" : "Cambiar a tema oscuro"}
