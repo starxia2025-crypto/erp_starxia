@@ -109,6 +109,9 @@ const cropImageToSquareBlob = (imageSource, zoom = 1.2) =>
     image.src = imageSource;
   });
 
+const isAnimatedGifFile = (file) =>
+  file && ((file.type || "").toLowerCase() === "image/gif" || file.name.toLowerCase().endsWith(".gif"));
+
 const Settings = () => {
   const { user, setUser, checkAuth } = useAuth();
   const canEditCompany = hasPermission(user, "settings.write");
@@ -306,6 +309,27 @@ const Settings = () => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+
+    if (isAnimatedGifFile(file)) {
+      const form = new FormData();
+      form.append("file", file);
+      setUploadingProfilePicture(true);
+      try {
+        const response = await axios.post(`${API}/users/me/picture`, form, {
+          withCredentials: true,
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        setUser((current) => (current ? { ...current, ...response.data } : response.data));
+        await checkAuth();
+        toast.success("GIF de perfil actualizado");
+      } catch (error) {
+        toast.error(error.response?.data?.detail || "No se pudo subir la foto de perfil");
+      } finally {
+        setUploadingProfilePicture(false);
+      }
+      return;
+    }
+
     try {
       const dataUrl = await readFileAsDataUrl(file);
       setProfileCropSource(dataUrl);
@@ -523,7 +547,7 @@ const Settings = () => {
                       {uploadingProfilePicture ? "Subiendo..." : "Seleccionar archivo"}
                     </Button>
                     <p className="max-w-xs text-xs leading-5 text-muted-foreground">
-                      Sube una imagen JPG, PNG, WEBP, GIF o SVG de hasta 5 MB. Podras ajustarla antes de guardarla.
+                      Sube una imagen JPG, PNG, WEBP, GIF o SVG de hasta 5 MB. Las imagenes fijas se pueden ajustar antes de guardarlas; los GIF se conservan animados.
                     </p>
                   </div>
                 </div>
