@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { Building2, Mail, Shield, User, Users } from "lucide-react";
+import { Building2, FileText, Mail, Shield, User, Users } from "lucide-react";
 
 import Layout from "@/components/layout/Layout";
 import { useAuth } from "@/App";
@@ -27,13 +27,17 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const API = API_BASE;
 const ROLE_OPTIONS = [
+  { value: "owner", label: "Owner" },
   { value: "admin", label: "Admin" },
   { value: "manager", label: "Manager" },
   { value: "sales", label: "Ventas" },
   { value: "warehouse", label: "Almacen" },
+  { value: "employee", label: "Empleado" },
+  { value: "advisor", label: "Asesoria" },
 ];
 
 const emptyEmployeeForm = {
@@ -51,18 +55,34 @@ const Settings = () => {
 
   const [company, setCompany] = useState(null);
   const [employees, setEmployees] = useState([]);
+  const [legalDocuments, setLegalDocuments] = useState([]);
+  const [legalAcceptances, setLegalAcceptances] = useState([]);
+  const [processingActivities, setProcessingActivities] = useState([]);
   const [loading, setLoading] = useState(true);
   const [savingCompany, setSavingCompany] = useState(false);
   const [savingEmployee, setSavingEmployee] = useState(false);
   const [updatingUserId, setUpdatingUserId] = useState(null);
   const [formData, setFormData] = useState({
     name: "",
+    legal_name: "",
     tax_id: "",
     address: "",
+    country: "ES",
     phone: "",
     email: "",
+    billing_email: "",
+    verifactu_enabled: true,
+    aeat_submission_enabled: false,
   });
   const [employeeForm, setEmployeeForm] = useState(emptyEmployeeForm);
+  const [activityForm, setActivityForm] = useState({
+    code: "",
+    title: "",
+    purpose: "",
+    legal_basis: "",
+    retention_period: "",
+    security_measures: "",
+  });
 
   const roleLabelByValue = useMemo(
     () => Object.fromEntries(ROLE_OPTIONS.map((item) => [item.value, item.label])),
@@ -71,24 +91,44 @@ const Settings = () => {
 
   const loadSettings = useCallback(async () => {
     try {
-      const requests = [axios.get(`${API}/companies`, { withCredentials: true })];
+      const requests = [
+        axios.get(`${API}/companies`, { withCredentials: true }),
+        axios.get(`${API}/legal-documents`, { withCredentials: true }),
+        axios.get(`${API}/legal-acceptances`, { withCredentials: true }),
+        axios.get(`${API}/processing-activities`, { withCredentials: true }),
+      ];
       if (canViewUsers) {
         requests.push(axios.get(`${API}/users`, { withCredentials: true }));
       }
 
-      const [companyResponse, usersResponse] = await Promise.all(requests);
+      const [
+        companyResponse,
+        legalDocsResponse,
+        legalAcceptancesResponse,
+        processingActivitiesResponse,
+        usersResponse,
+      ] = await Promise.all(requests);
 
       if (companyResponse.data.length > 0) {
         const currentCompany = companyResponse.data[0];
         setCompany(currentCompany);
         setFormData({
           name: currentCompany.name || "",
+          legal_name: currentCompany.legal_name || "",
           tax_id: currentCompany.tax_id || "",
           address: currentCompany.address || "",
+          country: currentCompany.country || "ES",
           phone: currentCompany.phone || "",
           email: currentCompany.email || "",
+          billing_email: currentCompany.billing_email || "",
+          verifactu_enabled: Boolean(currentCompany.verifactu_enabled),
+          aeat_submission_enabled: Boolean(currentCompany.aeat_submission_enabled),
         });
       }
+
+      setLegalDocuments(legalDocsResponse.data);
+      setLegalAcceptances(legalAcceptancesResponse.data);
+      setProcessingActivities(processingActivitiesResponse.data);
 
       if (usersResponse) {
         setEmployees(usersResponse.data);
@@ -99,6 +139,11 @@ const Settings = () => {
       setLoading(false);
     }
   }, [canViewUsers]);
+
+  const pendingDocuments = useMemo(
+    () => company?.pending_legal_documents || [],
+    [company]
+  );
 
   useEffect(() => {
     loadSettings();
@@ -165,6 +210,56 @@ const Settings = () => {
     }
   };
 
+  const handleProcessingActivitySubmit = async (event) => {
+    event.preventDefault();
+    if (!canEditCompany) return;
+
+    try {
+      await axios.post(`${API}/processing-activities`, activityForm, { withCredentials: true });
+      toast.success("Actividad de tratamiento guardada");
+      setActivityForm({
+        code: "",
+        title: "",
+        purpose: "",
+        legal_basis: "",
+        retention_period: "",
+        security_measures: "",
+      });
+      await loadSettings();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo guardar la actividad");
+    }
+  };
+
+  const handlePrivacyAction = async (action) => {
+    try {
+      const endpoint =
+        action === "export"
+          ? `${API}/privacy/export`
+          : action === "erase"
+            ? `${API}/privacy/erasure-request`
+            : `${API}/privacy/deactivate-account`;
+      const method = action === "export" ? "get" : "post";
+      const response = await axios({ method, url: endpoint, withCredentials: true });
+      if (action === "export") {
+        const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: "application/json" });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `privacy-export-${user?.user_id || "user"}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+        toast.success("Exportacion generada");
+        return;
+      }
+      toast.success(response.data.message || "Solicitud registrada");
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo completar la solicitud");
+    }
+  };
+
   const getRoleBadgeVariant = (role) => {
     if (role === "admin") return "default";
     if (role === "manager") return "secondary";
@@ -215,62 +310,185 @@ const Settings = () => {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Building2 className="h-5 w-5" />
-              Datos de la empresa
+              Configuracion de empresa
             </CardTitle>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleCompanySubmit} className="space-y-4">
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div>
-                  <Label htmlFor="company-name">Nombre de la empresa</Label>
-                  <Input
-                    id="company-name"
-                    value={formData.name}
-                    onChange={(event) => setFormData({ ...formData, name: event.target.value })}
-                    disabled={!canEditCompany}
-                    required
-                    data-testid="company-name-input"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="company-tax-id">NIF/CIF</Label>
-                  <Input
-                    id="company-tax-id"
-                    value={formData.tax_id}
-                    onChange={(event) => setFormData({ ...formData, tax_id: event.target.value })}
-                    disabled={!canEditCompany}
-                    data-testid="company-tax-input"
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <Label htmlFor="company-address">Direccion</Label>
-                  <Input
-                    id="company-address"
-                    value={formData.address}
-                    onChange={(event) => setFormData({ ...formData, address: event.target.value })}
-                    disabled={!canEditCompany}
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="company-phone">Telefono</Label>
-                  <Input
-                    id="company-phone"
-                    value={formData.phone}
-                    onChange={(event) => setFormData({ ...formData, phone: event.target.value })}
-                    disabled={!canEditCompany}
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="company-email">Email</Label>
-                  <Input
-                    id="company-email"
-                    type="email"
-                    value={formData.email}
-                    onChange={(event) => setFormData({ ...formData, email: event.target.value })}
-                    disabled={!canEditCompany}
-                  />
-                </div>
-              </div>
+              <Tabs defaultValue="fiscal" className="space-y-6">
+                <TabsList className="grid w-full grid-cols-3">
+                  <TabsTrigger value="fiscal">Fiscal</TabsTrigger>
+                  <TabsTrigger value="legal">Legal</TabsTrigger>
+                  <TabsTrigger value="privacy">Privacidad y datos</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="fiscal" className="space-y-4">
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <Field label="Nombre comercial">
+                      <Input value={formData.name} onChange={(event) => setFormData({ ...formData, name: event.target.value })} disabled={!canEditCompany} />
+                    </Field>
+                    <Field label="Razon social">
+                      <Input value={formData.legal_name} onChange={(event) => setFormData({ ...formData, legal_name: event.target.value })} disabled={!canEditCompany} />
+                    </Field>
+                    <Field label="NIF/CIF">
+                      <Input value={formData.tax_id} onChange={(event) => setFormData({ ...formData, tax_id: event.target.value })} disabled={!canEditCompany} />
+                    </Field>
+                    <Field label="Pais">
+                      <Input value={formData.country} onChange={(event) => setFormData({ ...formData, country: event.target.value.toUpperCase() })} disabled={!canEditCompany} />
+                    </Field>
+                    <Field label="Direccion" className="md:col-span-2">
+                      <Input value={formData.address} onChange={(event) => setFormData({ ...formData, address: event.target.value })} disabled={!canEditCompany} />
+                    </Field>
+                    <Field label="Email empresa">
+                      <Input type="email" value={formData.email} onChange={(event) => setFormData({ ...formData, email: event.target.value })} disabled={!canEditCompany} />
+                    </Field>
+                    <Field label="Email de facturacion">
+                      <Input type="email" value={formData.billing_email} onChange={(event) => setFormData({ ...formData, billing_email: event.target.value })} disabled={!canEditCompany} />
+                    </Field>
+                    <Field label="Telefono">
+                      <Input value={formData.phone} onChange={(event) => setFormData({ ...formData, phone: event.target.value })} disabled={!canEditCompany} />
+                    </Field>
+                    <div className="space-y-3 rounded-lg border border-border p-4 md:col-span-2">
+                      <Label className="text-sm font-medium">Cumplimiento fiscal</Label>
+                      <label className="flex items-center gap-3 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={formData.verifactu_enabled}
+                          onChange={(event) => setFormData({ ...formData, verifactu_enabled: event.target.checked })}
+                          disabled={!canEditCompany}
+                        />
+                        VERI*FACTU habilitado
+                      </label>
+                      <label className="flex items-center gap-3 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={formData.aeat_submission_enabled}
+                          onChange={(event) => setFormData({ ...formData, aeat_submission_enabled: event.target.checked })}
+                          disabled={!canEditCompany}
+                        />
+                        Remision AEAT preparada
+                      </label>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="legal" className="space-y-4">
+                  <div className="rounded-lg border border-border p-4">
+                    <div className="mb-3 flex items-center gap-2 text-sm font-medium">
+                      <FileText className="h-4 w-4" />
+                      Documentacion legal aceptada
+                    </div>
+                    {pendingDocuments.length > 0 && (
+                      <div className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
+                        Hay documentos pendientes de reaceptacion por cambio de version.
+                      </div>
+                    )}
+                    <div className="space-y-2 text-sm">
+                      {legalDocuments.map((document) => (
+                        <div key={`${document.code}-${document.version}`} className="flex items-center justify-between rounded-md border border-border p-3">
+                          <div>
+                            <p className="font-medium">{document.title}</p>
+                            <p className="text-muted-foreground">Codigo {document.code} · Version {document.version}</p>
+                          </div>
+                          <Badge variant={pendingDocuments.some((item) => item.code === document.code && item.version === document.version) ? "destructive" : "secondary"}>
+                            {pendingDocuments.some((item) => item.code === document.code && item.version === document.version) ? "Pendiente" : "Activa"}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border p-4">
+                    <div className="mb-3 text-sm font-medium">Historial de aceptaciones</div>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Documento</TableHead>
+                          <TableHead>Version</TableHead>
+                          <TableHead>Fecha</TableHead>
+                          <TableHead>IP</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {legalAcceptances.map((item) => (
+                          <TableRow key={item.acceptance_id}>
+                            <TableCell>{item.document_code}</TableCell>
+                            <TableCell>{item.document_version}</TableCell>
+                            <TableCell>{new Date(item.accepted_at).toLocaleString("es-ES")}</TableCell>
+                            <TableCell>{item.ip_address || "-"}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="privacy" className="space-y-4">
+                  <div className="rounded-lg border border-border p-4">
+                    <div className="mb-4">
+                      <p className="mb-1 font-medium text-foreground">Registro de actividades de tratamiento</p>
+                      <p className="text-sm text-muted-foreground">
+                        Configura finalidades, base juridica, conservacion y medidas de seguridad del tratamiento.
+                      </p>
+                    </div>
+                    <form className="grid grid-cols-1 gap-4 md:grid-cols-2" onSubmit={handleProcessingActivitySubmit}>
+                      <Field label="Codigo">
+                        <Input value={activityForm.code} onChange={(event) => setActivityForm({ ...activityForm, code: event.target.value })} disabled={!canEditCompany} />
+                      </Field>
+                      <Field label="Titulo">
+                        <Input value={activityForm.title} onChange={(event) => setActivityForm({ ...activityForm, title: event.target.value })} disabled={!canEditCompany} />
+                      </Field>
+                      <Field label="Finalidad" className="md:col-span-2">
+                        <Input value={activityForm.purpose} onChange={(event) => setActivityForm({ ...activityForm, purpose: event.target.value })} disabled={!canEditCompany} />
+                      </Field>
+                      <Field label="Base juridica">
+                        <Input value={activityForm.legal_basis} onChange={(event) => setActivityForm({ ...activityForm, legal_basis: event.target.value })} disabled={!canEditCompany} />
+                      </Field>
+                      <Field label="Conservacion">
+                        <Input value={activityForm.retention_period} onChange={(event) => setActivityForm({ ...activityForm, retention_period: event.target.value })} disabled={!canEditCompany} />
+                      </Field>
+                      <Field label="Medidas de seguridad" className="md:col-span-2">
+                        <Input value={activityForm.security_measures} onChange={(event) => setActivityForm({ ...activityForm, security_measures: event.target.value })} disabled={!canEditCompany} />
+                      </Field>
+                      {canEditCompany && (
+                        <div className="flex justify-end md:col-span-2">
+                          <Button type="submit">Guardar actividad</Button>
+                        </div>
+                      )}
+                    </form>
+                    <div className="mt-4 space-y-2">
+                      {processingActivities.length > 0 ? (
+                        processingActivities.map((activity) => (
+                          <div key={activity.activity_id} className="rounded-md border border-border p-3 text-sm">
+                            <p className="font-medium">{activity.title}</p>
+                            <p className="text-muted-foreground">{activity.code}</p>
+                            <p className="mt-1 text-muted-foreground">{activity.purpose || "Sin finalidad detallada"}</p>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-sm text-muted-foreground">Todavia no hay actividades registradas.</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-border p-4 text-sm">
+                    <p className="mb-2 font-medium text-foreground">Derechos de los interesados</p>
+                    <p className="mb-4 text-muted-foreground">
+                      Genera una exportacion de datos, registra una solicitud de supresion o desactiva tu acceso con trazabilidad.
+                    </p>
+                    <div className="flex flex-wrap gap-3">
+                      <Button type="button" variant="outline" onClick={() => handlePrivacyAction("export")}>
+                        Exportar mis datos
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => handlePrivacyAction("erase")}>
+                        Solicitar supresion
+                      </Button>
+                      <Button type="button" variant="outline" onClick={() => handlePrivacyAction("deactivate")}>
+                        Desactivar cuenta
+                      </Button>
+                    </div>
+                  </div>
+                </TabsContent>
+              </Tabs>
 
               <div className="flex justify-between gap-3 pt-4">
                 <p className="text-sm text-muted-foreground">
@@ -452,3 +670,10 @@ const Settings = () => {
 };
 
 export default Settings;
+
+const Field = ({ label, children, className = "" }) => (
+  <div className={className}>
+    <Label className="mb-2 block">{label}</Label>
+    {children}
+  </div>
+);

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { Bot, Building2, FileText, Package, Shield, Users, BarChart3, KeyRound } from "lucide-react";
 
@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { API_BASE } from "@/lib/api";
+import LegalFooter from "@/components/layout/LegalFooter";
 
 const API = API_BASE;
 
@@ -27,6 +28,7 @@ const initialRegister = {
 };
 const initialForgotPassword = { email: "" };
 const initialResetPassword = { new_password: "", confirm_password: "" };
+const initialConsents = { terms: false, privacy: false };
 const authInputClassName =
   "border-white/15 bg-white/5 text-white placeholder:text-zinc-500 caret-white autofill:bg-transparent";
 
@@ -76,6 +78,8 @@ const Landing = () => {
   const [submitting, setSubmitting] = useState(false);
   const [requestingReset, setRequestingReset] = useState(false);
   const [resettingPassword, setResettingPassword] = useState(false);
+  const [consents, setConsents] = useState(initialConsents);
+  const [legalDocuments, setLegalDocuments] = useState([]);
 
   const hasResetToken = useMemo(() => Boolean(resetToken), [resetToken]);
 
@@ -84,6 +88,18 @@ const Landing = () => {
       navigate("/dashboard");
     }
   }, [user, navigate, hasResetToken]);
+
+  useEffect(() => {
+    const loadLegalDocuments = async () => {
+      try {
+        const response = await axios.get(`${API}/public/legal-documents`);
+        setLegalDocuments(response.data);
+      } catch (error) {
+        setLegalDocuments([]);
+      }
+    };
+    loadLegalDocuments();
+  }, []);
 
   const handleLogin = async (event) => {
     event.preventDefault();
@@ -101,6 +117,10 @@ const Landing = () => {
 
   const handleRegister = async (event) => {
     event.preventDefault();
+    if (!consents.terms || !consents.privacy) {
+      toast.error("Debes aceptar terminos y politica de privacidad");
+      return;
+    }
     setSubmitting(true);
     try {
       const payload = {
@@ -109,6 +129,8 @@ const Landing = () => {
         company_address: registerForm.company_address || null,
         company_phone: registerForm.company_phone || null,
         company_email: registerForm.company_email || null,
+        accept_terms: consents.terms,
+        accept_privacy: consents.privacy,
       };
       const response = await axios.post(`${API}/auth/register`, payload, { withCredentials: true });
       setUser(response.data);
@@ -393,6 +415,38 @@ const Landing = () => {
                           required
                         />
                       </div>
+                      <div className="space-y-3 rounded-xl border border-white/10 bg-white/5 p-4 text-sm text-zinc-300">
+                        <label className="flex items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={consents.terms}
+                            onChange={(event) => setConsents((current) => ({ ...current, terms: event.target.checked }))}
+                            className="mt-1"
+                          />
+                          <span>
+                            Acepto los{" "}
+                            <Link to="/legal/terms" className="text-primary underline">
+                              terminos y condiciones
+                            </Link>{" "}
+                            vigentes {versionFor("terms", legalDocuments)}.
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={consents.privacy}
+                            onChange={(event) => setConsents((current) => ({ ...current, privacy: event.target.checked }))}
+                            className="mt-1"
+                          />
+                          <span>
+                            Acepto la{" "}
+                            <Link to="/legal/privacy" className="text-primary underline">
+                              politica de privacidad
+                            </Link>{" "}
+                            vigente {versionFor("privacy", legalDocuments)}.
+                          </span>
+                        </label>
+                      </div>
                       <Button className="w-full" type="submit" disabled={submitting}>
                         {submitting ? "Creando..." : "Crear empresa y acceder"}
                       </Button>
@@ -404,8 +458,14 @@ const Landing = () => {
           </Card>
         </div>
       </div>
+      <LegalFooter />
     </div>
   );
+};
+
+const versionFor = (code, documents) => {
+  const item = documents.find((document) => document.code === code);
+  return item ? `(v${item.version})` : "";
 };
 
 export default Landing;

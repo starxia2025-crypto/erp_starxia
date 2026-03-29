@@ -27,6 +27,7 @@ import Settings from "@/pages/Settings";
 import Statistics from "@/pages/Statistics";
 import StockTransfers from "@/pages/StockTransfers";
 import AIAssistant from "@/pages/AIAssistant";
+import LegalDocumentPage from "@/pages/LegalDocumentPage";
 
 const API = API_BASE;
 
@@ -104,6 +105,7 @@ const AppRouter = () => {
   return (
     <Routes>
       <Route path="/" element={<Landing />} />
+      <Route path="/legal/:code" element={<LegalDocumentPage />} />
       <Route path="/dashboard" element={<ProtectedRoute permission="dashboard.read"><Dashboard /></ProtectedRoute>} />
       <Route path="/clients" element={<ProtectedRoute permission="clients.read"><Clients /></ProtectedRoute>} />
       <Route path="/client-types" element={<ProtectedRoute permission="clients.read"><ClientTypes /></ProtectedRoute>} />

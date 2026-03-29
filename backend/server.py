@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -14,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
  
 import pandas as pd
+from compliance_services import build_verifactu_export, get_aeat_adapter
 from dotenv import load_dotenv
 from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
@@ -23,7 +25,7 @@ from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.pdfgen import canvas
-from sqlalchemy import JSON, DateTime, Float, Integer, MetaData, String, Text, UniqueConstraint, create_engine, text
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, MetaData, String, Text, UniqueConstraint, create_engine, text
 from sqlalchemy.orm import Session, declarative_base, mapped_column, sessionmaker
 from starlette.middleware.cors import CORSMiddleware
 
@@ -84,10 +86,77 @@ class CompanyModel(PublicBase, TimestampMixin):
     company_id = mapped_column(String(32), primary_key=True)
     schema_name = mapped_column(String(63), unique=True, nullable=False, index=True)
     name = mapped_column(String(255), nullable=False)
+    legal_name = mapped_column(String(255))
     tax_id = mapped_column(String(64))
     address = mapped_column(Text)
+    country = mapped_column(String(2), default="ES", nullable=False)
     phone = mapped_column(String(64))
     email = mapped_column(String(255))
+    billing_email = mapped_column(String(255))
+    fiscal_series_config = mapped_column(JSON, default=dict, nullable=False)
+    verifactu_enabled = mapped_column(Boolean, default=True, nullable=False)
+    aeat_submission_enabled = mapped_column(Boolean, default=False, nullable=False)
+
+
+class LegalDocumentModel(PublicBase, TimestampMixin):
+    __tablename__ = "legal_documents"
+    __table_args__ = (UniqueConstraint("code", "version", name="uq_legal_document_code_version"),)
+
+    document_id = mapped_column(String(32), primary_key=True)
+    code = mapped_column(String(64), nullable=False, index=True)
+    version = mapped_column(String(32), nullable=False)
+    title = mapped_column(String(255), nullable=False)
+    language = mapped_column(String(8), default="es", nullable=False)
+    content = mapped_column(Text, nullable=False)
+    is_active = mapped_column(Boolean, default=True, nullable=False)
+    requires_acceptance = mapped_column(Boolean, default=True, nullable=False)
+    published_at = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class LegalAcceptanceModel(PublicBase, TimestampMixin):
+    __tablename__ = "legal_acceptances"
+    __table_args__ = (
+        UniqueConstraint("user_id", "company_id", "document_code", "document_version", name="uq_legal_acceptance_version"),
+    )
+
+    acceptance_id = mapped_column(String(32), primary_key=True)
+    user_id = mapped_column(String(32), nullable=False, index=True)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+    document_code = mapped_column(String(64), nullable=False, index=True)
+    document_version = mapped_column(String(32), nullable=False)
+    accepted = mapped_column(Boolean, default=True, nullable=False)
+    accepted_at = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    ip_address = mapped_column(String(64))
+    user_agent = mapped_column(Text)
+
+
+class ProcessingActivityModel(PublicBase, TimestampMixin, UpdatedTimestampMixin):
+    __tablename__ = "processing_activities"
+
+    activity_id = mapped_column(String(32), primary_key=True)
+    code = mapped_column(String(64), nullable=False, unique=True)
+    title = mapped_column(String(255), nullable=False)
+    purpose = mapped_column(Text)
+    legal_basis = mapped_column(Text)
+    data_categories = mapped_column(Text)
+    data_subject_categories = mapped_column(Text)
+    recipients = mapped_column(Text)
+    processors = mapped_column(Text)
+    retention_period = mapped_column(Text)
+    security_measures = mapped_column(Text)
+    international_transfers = mapped_column(Text)
+
+
+class SecurityAuditLogModel(PublicBase, TimestampMixin):
+    __tablename__ = "security_audit_logs"
+
+    log_id = mapped_column(String(32), primary_key=True)
+    company_id = mapped_column(String(32), index=True)
+    user_id = mapped_column(String(32), index=True)
+    action = mapped_column(String(128), nullable=False, index=True)
+    entity_type = mapped_column(String(64))
+    entity_id = mapped_column(String(32))
+    metadata_json = mapped_column(JSON, default=dict, nullable=False)
 
 
 class UserModel(PublicBase, TimestampMixin):
@@ -211,15 +280,25 @@ class InvoiceModel(TenantBase, TimestampMixin):
     __tablename__ = "invoices"
 
     invoice_id = mapped_column(String(32), primary_key=True)
+    series = mapped_column(String(32), default="GEN", nullable=False)
+    number = mapped_column(Integer, default=1, nullable=False)
     invoice_number = mapped_column(String(64), nullable=False)
     client_id = mapped_column(String(32), nullable=False)
     client_name = mapped_column(String(255), nullable=False)
     order_id = mapped_column(String(32))
+    issue_date = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    operation_date = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    invoice_type = mapped_column(String(32), default="complete", nullable=False)
+    simplified = mapped_column(Boolean, default=False, nullable=False)
+    rectified_invoice_id = mapped_column(String(32))
     items = mapped_column(JSON, default=list, nullable=False)
     subtotal = mapped_column(Float, default=0.0, nullable=False)
     tax = mapped_column(Float, default=0.0, nullable=False)
     total = mapped_column(Float, default=0.0, nullable=False)
-    status = mapped_column(String(32), default="pending", nullable=False)
+    currency = mapped_column(String(8), default="EUR", nullable=False)
+    pdf_path = mapped_column(Text)
+    status = mapped_column(String(32), default="issued", nullable=False)
+    immutable_at = mapped_column(DateTime(timezone=True))
     due_date = mapped_column(DateTime(timezone=True))
     paid_date = mapped_column(DateTime(timezone=True))
     company_id = mapped_column(String(32), nullable=False, index=True)
@@ -257,6 +336,38 @@ class PurchaseInvoiceModel(TenantBase, TimestampMixin):
     due_date = mapped_column(DateTime(timezone=True))
     paid_date = mapped_column(DateTime(timezone=True))
     company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class InvoiceRecordModel(TenantBase, TimestampMixin):
+    __tablename__ = "invoice_records"
+
+    record_id = mapped_column(String(32), primary_key=True)
+    invoice_id = mapped_column(String(32), nullable=False, index=True)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+    record_type = mapped_column(String(32), nullable=False)
+    canonical_payload = mapped_column(Text, nullable=False)
+    hash_current = mapped_column(String(128), nullable=False, index=True)
+    hash_previous = mapped_column(String(128))
+    generated_at = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    signed = mapped_column(Boolean, default=False, nullable=False)
+    signature_value = mapped_column(Text)
+    sent_to_aeat = mapped_column(Boolean, default=False, nullable=False)
+    sent_at = mapped_column(DateTime(timezone=True))
+    aeat_response = mapped_column(Text)
+
+
+class SystemEventModel(TenantBase, TimestampMixin):
+    __tablename__ = "system_events"
+
+    event_id = mapped_column(String(32), primary_key=True)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+    user_id = mapped_column(String(32), nullable=False, index=True)
+    event_type = mapped_column(String(128), nullable=False, index=True)
+    entity_type = mapped_column(String(64), nullable=False)
+    entity_id = mapped_column(String(32), nullable=False)
+    payload = mapped_column(JSON, default=dict, nullable=False)
+    hash_current = mapped_column(String(128), nullable=False, index=True)
+    hash_previous = mapped_column(String(128))
 
 
 class ReturnModel(TenantBase, TimestampMixin):
@@ -309,6 +420,14 @@ class RegisterInput(BaseModel):
     company_address: Optional[str] = None
     company_phone: Optional[str] = None
     company_email: Optional[EmailStr] = None
+    accept_terms: bool = False
+    accept_privacy: bool = False
+
+
+class LegalAcceptanceInput(BaseModel):
+    document_code: str
+    document_version: str
+    accepted: bool = True
 
 
 class LoginInput(BaseModel):
@@ -355,6 +474,7 @@ class UpdateUserInput(BaseModel):
 app = FastAPI(title="Starxia ERP API")
 
 ROLE_PERMISSIONS = {
+    "owner": {"*"},
     "admin": {"*"},
     "manager": {
         "dashboard.read",
@@ -390,6 +510,23 @@ ROLE_PERMISSIONS = {
         "inventory.read",
         "inventory.write",
         "ai.read",
+    },
+    "employee": {
+        "dashboard.read",
+        "ai.read",
+    },
+    "advisor": {
+        "dashboard.read",
+        "clients.read",
+        "suppliers.read",
+        "products.read",
+        "inventory.read",
+        "sales.read",
+        "purchases.read",
+        "reports.read",
+        "settings.read",
+        "ai.read",
+        "users.read",
     },
 }
 VALID_ROLES = set(ROLE_PERMISSIONS.keys())
@@ -450,6 +587,51 @@ def require_permission(user: UserModel, permission: str) -> None:
         raise HTTPException(status_code=403, detail="Not authorized for this action")
 
 
+def get_active_legal_documents(db: Session, requires_acceptance: Optional[bool] = None) -> List[LegalDocumentModel]:
+    query = db.query(LegalDocumentModel).filter(LegalDocumentModel.is_active.is_(True))
+    if requires_acceptance is not None:
+        query = query.filter(LegalDocumentModel.requires_acceptance.is_(requires_acceptance))
+    return query.order_by(LegalDocumentModel.code.asc(), LegalDocumentModel.published_at.desc()).all()
+
+
+def get_latest_legal_document_by_code(db: Session, code: str) -> LegalDocumentModel:
+    document = (
+        db.query(LegalDocumentModel)
+        .filter(LegalDocumentModel.code == code, LegalDocumentModel.is_active.is_(True))
+        .order_by(LegalDocumentModel.published_at.desc())
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail=f"Legal document '{code}' not found")
+    return document
+
+
+def get_required_legal_reacceptances(db: Session, user: UserModel) -> List[Dict[str, Any]]:
+    pending: List[Dict[str, Any]] = []
+    required_documents = get_active_legal_documents(db, requires_acceptance=True)
+    for document in required_documents:
+        acceptance = (
+            db.query(LegalAcceptanceModel)
+            .filter(
+                LegalAcceptanceModel.user_id == user.user_id,
+                LegalAcceptanceModel.company_id == user.company_id,
+                LegalAcceptanceModel.document_code == document.code,
+                LegalAcceptanceModel.document_version == document.version,
+                LegalAcceptanceModel.accepted.is_(True),
+            )
+            .first()
+        )
+        if not acceptance:
+            pending.append(
+                {
+                    "code": document.code,
+                    "version": document.version,
+                    "title": document.title,
+                }
+            )
+    return pending
+
+
 def serialize_user(user: UserModel) -> Dict[str, Any]:
     data = model_to_dict(user, exclude={"password_hash"})
     data["permissions"] = sorted(permissions_for_role(user.role))
@@ -463,6 +645,14 @@ def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def canonical_json(data: Dict[str, Any]) -> str:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def hash_password(password: str) -> str:
@@ -487,6 +677,190 @@ def ensure_schema_exists(schema_name: str) -> None:
         tenant_bind = connection.execution_options(schema_translate_map={"tenant": schema_name})
         TenantBase.metadata.create_all(bind=tenant_bind)
 
+
+def apply_public_migrations() -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    statements = [
+        'ALTER TABLE companies ADD COLUMN IF NOT EXISTS legal_name VARCHAR(255)',
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS country VARCHAR(2) NOT NULL DEFAULT 'ES'",
+        'ALTER TABLE companies ADD COLUMN IF NOT EXISTS billing_email VARCHAR(255)',
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS fiscal_series_config JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS verifactu_enabled BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS aeat_submission_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+        """
+        CREATE TABLE IF NOT EXISTS legal_documents (
+            document_id VARCHAR(32) PRIMARY KEY,
+            code VARCHAR(64) NOT NULL,
+            version VARCHAR(32) NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            language VARCHAR(8) NOT NULL DEFAULT 'es',
+            content TEXT NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            requires_acceptance BOOLEAN NOT NULL DEFAULT TRUE,
+            published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_legal_document_code_version UNIQUE (code, version)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS legal_acceptances (
+            acceptance_id VARCHAR(32) PRIMARY KEY,
+            user_id VARCHAR(32) NOT NULL,
+            company_id VARCHAR(32) NOT NULL,
+            document_code VARCHAR(64) NOT NULL,
+            document_version VARCHAR(32) NOT NULL,
+            accepted BOOLEAN NOT NULL DEFAULT TRUE,
+            accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            ip_address VARCHAR(64),
+            user_agent TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_legal_acceptance_version UNIQUE (user_id, company_id, document_code, document_version)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS processing_activities (
+            activity_id VARCHAR(32) PRIMARY KEY,
+            code VARCHAR(64) NOT NULL UNIQUE,
+            title VARCHAR(255) NOT NULL,
+            purpose TEXT,
+            legal_basis TEXT,
+            data_categories TEXT,
+            data_subject_categories TEXT,
+            recipients TEXT,
+            processors TEXT,
+            retention_period TEXT,
+            security_measures TEXT,
+            international_transfers TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS security_audit_logs (
+            log_id VARCHAR(32) PRIMARY KEY,
+            company_id VARCHAR(32),
+            user_id VARCHAR(32),
+            action VARCHAR(128) NOT NULL,
+            entity_type VARCHAR(64),
+            entity_id VARCHAR(32),
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+    ]
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
+def apply_tenant_migrations(schema_name: str) -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    schema = f'"{schema_name}"'
+    statements = [
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS series VARCHAR(32) NOT NULL DEFAULT 'GEN'",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS number INTEGER NOT NULL DEFAULT 1",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS issue_date TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS operation_date TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS invoice_type VARCHAR(32) NOT NULL DEFAULT 'complete'",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS simplified BOOLEAN NOT NULL DEFAULT FALSE",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS rectified_invoice_id VARCHAR(32)",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS currency VARCHAR(8) NOT NULL DEFAULT 'EUR'",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS pdf_path TEXT",
+        f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS immutable_at TIMESTAMPTZ",
+        """
+        CREATE TABLE IF NOT EXISTS "{schema_name}".invoice_records (
+            record_id VARCHAR(32) PRIMARY KEY,
+            invoice_id VARCHAR(32) NOT NULL,
+            company_id VARCHAR(32) NOT NULL,
+            record_type VARCHAR(32) NOT NULL,
+            canonical_payload TEXT NOT NULL,
+            hash_current VARCHAR(128) NOT NULL,
+            hash_previous VARCHAR(128),
+            generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            signed BOOLEAN NOT NULL DEFAULT FALSE,
+            signature_value TEXT,
+            sent_to_aeat BOOLEAN NOT NULL DEFAULT FALSE,
+            sent_at TIMESTAMPTZ,
+            aeat_response TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS "{schema_name}".system_events (
+            event_id VARCHAR(32) PRIMARY KEY,
+            company_id VARCHAR(32) NOT NULL,
+            user_id VARCHAR(32) NOT NULL,
+            event_type VARCHAR(128) NOT NULL,
+            entity_type VARCHAR(64) NOT NULL,
+            entity_id VARCHAR(32) NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+            hash_current VARCHAR(128) NOT NULL,
+            hash_previous VARCHAR(128),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+    ]
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
+def seed_legal_documents(db: Session) -> None:
+    seed_documents = [
+        (
+            "terms",
+            "2026.03",
+            "Terminos y condiciones",
+            "Estos terminos regulan el acceso y uso del ERP como servicio SaaS. TODO: revisar clausulas finales con asesoria juridica.",
+            True,
+        ),
+        (
+            "privacy",
+            "2026.03",
+            "Politica de privacidad",
+            "Informacion basica y ampliada sobre el tratamiento de datos personales conforme al RGPD y la LOPDGDD. TODO: completar con datos del responsable y plazos exactos.",
+            True,
+        ),
+        (
+            "dpa",
+            "2026.03",
+            "Contrato de encargado del tratamiento",
+            "Acuerdo de encargo del tratamiento entre el cliente y el proveedor del SaaS. TODO: validar clausulas del articulo 28 RGPD con asesoria.",
+            True,
+        ),
+        (
+            "cookies",
+            "2026.03",
+            "Politica de cookies",
+            "Informacion sobre uso de cookies tecnicas y otras tecnologias similares. TODO: ajustar si se anaden cookies analiticas o publicitarias.",
+            False,
+        ),
+    ]
+    changed = False
+    for code, version, title, content, requires_acceptance in seed_documents:
+        existing = (
+            db.query(LegalDocumentModel)
+            .filter(LegalDocumentModel.code == code, LegalDocumentModel.version == version)
+            .first()
+        )
+        if existing:
+            continue
+        db.add(
+            LegalDocumentModel(
+                document_id=prefixed_id("ldoc"),
+                code=code,
+                version=version,
+                title=title,
+                content=content,
+                requires_acceptance=requires_acceptance,
+                is_active=True,
+            )
+        )
+        changed = True
+    if changed:
+        db.commit()
 
 def create_access_token(user: UserModel) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
@@ -583,6 +957,29 @@ def send_password_reset_email(user: UserModel) -> None:
     send_email_message(user.email, "Restablece tu contrasena de Starxia ERP", body)
 
 
+def record_legal_acceptance(
+    db: Session,
+    user_id: str,
+    company_id: str,
+    document_code: str,
+    document_version: str,
+    request: Request,
+) -> LegalAcceptanceModel:
+    acceptance = LegalAcceptanceModel(
+        acceptance_id=prefixed_id("lacc"),
+        user_id=user_id,
+        company_id=company_id,
+        document_code=document_code,
+        document_version=document_version,
+        accepted=True,
+        accepted_at=datetime.now(timezone.utc),
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    db.add(acceptance)
+    return acceptance
+
+
 def get_token_from_request(request: Request, session_token: Optional[str]) -> str:
     token = session_token or request.cookies.get("session_token")
     if not token:
@@ -631,6 +1028,74 @@ def ensure_company_scope(user: UserModel, company_id: str) -> None:
 def generate_sequence(prefix: str, table: Any, company_id: str, db: Session) -> str:
     count = db.query(table).filter(table.company_id == company_id).count()
     return f"{prefix}-{str(count + 1).zfill(6)}"
+
+
+def get_next_invoice_number(series: str, user: UserModel, db: Session) -> int:
+    last_number = (
+        company_filter(db.query(InvoiceModel), InvoiceModel, user)
+        .filter(InvoiceModel.series == series)
+        .order_by(InvoiceModel.number.desc())
+        .with_entities(InvoiceModel.number)
+        .first()
+    )
+    return int(last_number[0]) + 1 if last_number else 1
+
+
+def log_security_event(
+    db: Session,
+    action: str,
+    company_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    metadata_json: Optional[Dict[str, Any]] = None,
+) -> None:
+    db.add(
+        SecurityAuditLogModel(
+            log_id=prefixed_id("slog"),
+            company_id=company_id,
+            user_id=user_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            metadata_json=metadata_json or {},
+        )
+    )
+
+
+def get_previous_system_event_hash(user: UserModel, db: Session) -> Optional[str]:
+    previous = (
+        company_filter(db.query(SystemEventModel), SystemEventModel, user)
+        .order_by(SystemEventModel.created_at.desc())
+        .first()
+    )
+    return previous.hash_current if previous else None
+
+
+def log_system_event(
+    db: Session,
+    user: UserModel,
+    event_type: str,
+    entity_type: str,
+    entity_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> SystemEventModel:
+    previous_hash = get_previous_system_event_hash(user, db)
+    canonical_payload = canonical_json(payload or {})
+    current_hash = sha256_hex(f"{previous_hash or ''}|{event_type}|{entity_type}|{entity_id}|{canonical_payload}")
+    event = SystemEventModel(
+        event_id=prefixed_id("evt"),
+        company_id=user.company_id,
+        user_id=user.user_id,
+        event_type=event_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        payload=payload or {},
+        hash_previous=previous_hash,
+        hash_current=current_hash,
+    )
+    db.add(event)
+    return event
 
 
 def company_filter(query, model, user: UserModel):
@@ -738,9 +1203,13 @@ def enrich_products_with_inventory(products: List[ProductModel], user: UserModel
     return enriched
 
 
-def enrich_invoice_like(item: Any) -> Dict[str, Any]:
+def enrich_invoice_like(item: Any, user: Optional[UserModel] = None, db: Optional[Session] = None) -> Dict[str, Any]:
     data = model_to_dict(item)
     data["outstanding_amount"] = 0 if data.get("status") == "paid" else float(data.get("total") or 0)
+    if user and db and isinstance(item, InvoiceModel):
+        record = latest_invoice_record(item.invoice_id, user, db)
+        data["fiscal_record_status"] = record.record_type if record else None
+        data["fiscal_record_hash"] = record.hash_current if record else None
     return data
 
 
@@ -764,6 +1233,158 @@ def get_invoice_inventory_warehouse_id(db: Session, user: UserModel, invoice: An
             return purchase_order.warehouse_id
 
     return get_default_warehouse(user, db).warehouse_id
+
+
+def build_invoice_canonical_payload(invoice: InvoiceModel, company: CompanyModel) -> Dict[str, Any]:
+    return {
+        "company_id": company.company_id,
+        "company_name": company.legal_name or company.name,
+        "company_tax_id": company.tax_id,
+        "invoice_id": invoice.invoice_id,
+        "series": invoice.series,
+        "number": invoice.number,
+        "invoice_number": invoice.invoice_number,
+        "issue_date": serialize_datetime(invoice.issue_date),
+        "operation_date": serialize_datetime(invoice.operation_date),
+        "invoice_type": invoice.invoice_type,
+        "simplified": invoice.simplified,
+        "rectified_invoice_id": invoice.rectified_invoice_id,
+        "status": invoice.status,
+        "client_id": invoice.client_id,
+        "client_name": invoice.client_name,
+        "currency": invoice.currency,
+        "subtotal": invoice.subtotal,
+        "tax": invoice.tax,
+        "total": invoice.total,
+        "items": invoice.items or [],
+    }
+
+
+def get_previous_invoice_record_hash(user: UserModel, db: Session) -> Optional[str]:
+    previous = (
+        company_filter(db.query(InvoiceRecordModel), InvoiceRecordModel, user)
+        .order_by(InvoiceRecordModel.generated_at.desc())
+        .first()
+    )
+    return previous.hash_current if previous else None
+
+
+def create_invoice_record(
+    db: Session,
+    user: UserModel,
+    company: CompanyModel,
+    invoice: InvoiceModel,
+    record_type: str,
+    extra_payload: Optional[Dict[str, Any]] = None,
+) -> InvoiceRecordModel:
+    payload = build_invoice_canonical_payload(invoice, company)
+    if extra_payload:
+        payload.update(extra_payload)
+    canonical_payload = canonical_json(payload)
+    previous_hash = get_previous_invoice_record_hash(user, db)
+    current_hash = sha256_hex(f"{previous_hash or ''}|{record_type}|{canonical_payload}")
+    record = InvoiceRecordModel(
+        record_id=prefixed_id("irec"),
+        invoice_id=invoice.invoice_id,
+        company_id=user.company_id,
+        record_type=record_type,
+        canonical_payload=canonical_payload,
+        hash_previous=previous_hash,
+        hash_current=current_hash,
+        generated_at=datetime.now(timezone.utc),
+        signed=False,
+        sent_to_aeat=False,
+    )
+    db.add(record)
+    return record
+
+
+def latest_invoice_record(invoice_id: str, user: UserModel, db: Session) -> Optional[InvoiceRecordModel]:
+    return (
+        company_filter(db.query(InvoiceRecordModel), InvoiceRecordModel, user)
+        .filter(InvoiceRecordModel.invoice_id == invoice_id)
+        .order_by(InvoiceRecordModel.generated_at.desc())
+        .first()
+    )
+
+
+def build_invoice_pdf_bytes(invoice: InvoiceModel, company: CompanyModel) -> bytes:
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    pdf.setTitle(f"Factura {invoice.invoice_number}")
+    pdf.setFont("Helvetica-Bold", 18)
+    pdf.drawString(40, height - 50, "Factura")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawRightString(width - 40, height - 50, invoice.invoice_number)
+
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(40, height - 90, company.legal_name or company.name)
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(40, height - 106, f"NIF/CIF: {company.tax_id or '-'}")
+    pdf.drawString(40, height - 122, f"Direccion: {company.address or '-'}")
+    pdf.drawString(40, height - 138, f"Email: {company.billing_email or company.email or '-'}")
+
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(40, height - 178, "Datos de factura")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(40, height - 194, f"Fecha de emision: {invoice.issue_date.astimezone(timezone.utc).date().isoformat() if invoice.issue_date else '-'}")
+    pdf.drawString(40, height - 210, f"Fecha de operacion: {invoice.operation_date.astimezone(timezone.utc).date().isoformat() if invoice.operation_date else '-'}")
+    pdf.drawString(40, height - 226, f"Tipo: {invoice.invoice_type}")
+    pdf.drawString(40, height - 242, f"Cliente: {invoice.client_name}")
+    pdf.drawString(40, height - 258, f"Estado: {invoice.status}")
+
+    y = height - 300
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(40, y, "Descripcion")
+    pdf.drawRightString(360, y, "Cantidad")
+    pdf.drawRightString(450, y, "Precio")
+    pdf.drawRightString(width - 40, y, "Total")
+    y -= 14
+    pdf.line(40, y, width - 40, y)
+    y -= 16
+
+    pdf.setFont("Helvetica", 10)
+    for line in invoice.items or []:
+        description = str(line.get("product_name") or line.get("description") or "Linea")
+        quantity = float(line.get("quantity", 0) or 0)
+        price = float(line.get("price", 0) or 0)
+        total = float(line.get("total", quantity * price) or 0)
+
+        if y < 120:
+            pdf.showPage()
+            y = height - 60
+            pdf.setFont("Helvetica", 10)
+
+        pdf.drawString(40, y, description[:48])
+        pdf.drawRightString(360, y, f"{quantity:.2f}")
+        pdf.drawRightString(450, y, f"{price:.2f} EUR")
+        pdf.drawRightString(width - 40, y, f"{total:.2f} EUR")
+        y -= 18
+
+    y -= 8
+    pdf.line(320, y, width - 40, y)
+    y -= 18
+    pdf.drawRightString(450, y, "Base imponible")
+    pdf.drawRightString(width - 40, y, f"{invoice.subtotal:.2f} EUR")
+    y -= 16
+    pdf.drawRightString(450, y, "IVA")
+    pdf.drawRightString(width - 40, y, f"{invoice.tax:.2f} EUR")
+    y -= 16
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawRightString(450, y, "Total")
+    pdf.drawRightString(width - 40, y, f"{invoice.total:.2f} EUR")
+
+    record_label_y = max(y - 34, 70)
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(40, record_label_y, f"Estado VERI*FACTU: {invoice.status}")
+    pdf.drawString(40, record_label_y - 14, "Documento generado por el sistema con trazabilidad y cadena hash interna.")
+
+    pdf.showPage()
+    pdf.save()
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def get_return_source_document(db: Session, user: UserModel, return_type: str, source_document_id: str):
@@ -901,7 +1522,7 @@ def query_report_rows(
 
     items = query.all()
     if model in {InvoiceModel, PurchaseInvoiceModel}:
-        return [enrich_invoice_like(item) for item in items]
+        return [enrich_invoice_like(item, user if model is InvoiceModel else None, db if model is InvoiceModel else None) for item in items]
     if model is StockTransferModel:
         return [enrich_transfer(item) for item in items]
     return [model_to_dict(item) for item in items]
@@ -1292,10 +1913,13 @@ def try_direct_read_response(user_message: str, user: UserModel, db: Session) ->
 
 @app.on_event("startup")
 def startup() -> None:
+    apply_public_migrations()
     PublicBase.metadata.create_all(bind=engine)
     with PublicSessionLocal() as db:
+        seed_legal_documents(db)
         companies = db.query(CompanyModel).all()
         for company in companies:
+            apply_tenant_migrations(company.schema_name)
             tenant_bind = get_tenant_bind(company.schema_name)
             TenantBase.metadata.create_all(bind=tenant_bind)
 
@@ -1305,23 +1929,237 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/public/legal-documents")
+def get_public_legal_documents(db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+    return [
+        model_to_dict(document)
+        for document in get_active_legal_documents(db)
+    ]
+
+
+@app.get("/api/legal-documents")
+def get_legal_documents(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "settings.read")
+    return [model_to_dict(document) for document in get_active_legal_documents(db)]
+
+
+@app.get("/api/legal-acceptances")
+def get_legal_acceptances(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "settings.read")
+    items = (
+        db.query(LegalAcceptanceModel)
+        .filter(LegalAcceptanceModel.company_id == user.company_id)
+        .order_by(LegalAcceptanceModel.accepted_at.desc())
+        .all()
+    )
+    return [model_to_dict(item) for item in items]
+
+
+@app.get("/api/legal-documents/pending")
+def get_pending_legal_documents(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+    return get_required_legal_reacceptances(db, user)
+
+
+@app.post("/api/legal-acceptances")
+def accept_legal_documents(
+    items: List[LegalAcceptanceInput],
+    request: Request,
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_public_db),
+) -> Dict[str, str]:
+    require_permission(user, "settings.read")
+    for item in items:
+        if not item.accepted:
+            continue
+        document = (
+            db.query(LegalDocumentModel)
+            .filter(
+                LegalDocumentModel.code == item.document_code,
+                LegalDocumentModel.version == item.document_version,
+                LegalDocumentModel.is_active.is_(True),
+            )
+            .first()
+        )
+        if not document:
+            raise HTTPException(status_code=400, detail=f"Documento legal invalido: {item.document_code}")
+        existing = (
+            db.query(LegalAcceptanceModel)
+            .filter(
+                LegalAcceptanceModel.user_id == user.user_id,
+                LegalAcceptanceModel.company_id == user.company_id,
+                LegalAcceptanceModel.document_code == item.document_code,
+                LegalAcceptanceModel.document_version == item.document_version,
+            )
+            .first()
+        )
+        if not existing:
+            record_legal_acceptance(db, user.user_id, user.company_id, item.document_code, item.document_version, request)
+            log_security_event(
+                db,
+                action="legal_acceptance.recorded",
+                company_id=user.company_id,
+                user_id=user.user_id,
+                entity_type="legal_document",
+                entity_id=item.document_code,
+                metadata_json={"version": item.document_version},
+            )
+    db.commit()
+    return {"message": "Legal acceptances stored"}
+
+
+@app.get("/api/processing-activities")
+def get_processing_activities(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "settings.read")
+    items = db.query(ProcessingActivityModel).order_by(ProcessingActivityModel.title.asc()).all()
+    return [model_to_dict(item) for item in items]
+
+
+@app.post("/api/processing-activities")
+def create_processing_activity(
+    data: Dict[str, Any],
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_public_db),
+) -> Dict[str, Any]:
+    require_permission(user, "settings.write")
+    code = (data.get("code") or "").strip().lower()
+    title = (data.get("title") or "").strip()
+    if not code or not title:
+        raise HTTPException(status_code=400, detail="Code and title are required")
+    existing = db.query(ProcessingActivityModel).filter(ProcessingActivityModel.code == code).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Processing activity code already exists")
+    item = ProcessingActivityModel(
+        activity_id=prefixed_id("rat"),
+        code=code,
+        title=title,
+        purpose=data.get("purpose"),
+        legal_basis=data.get("legal_basis"),
+        data_categories=data.get("data_categories"),
+        data_subject_categories=data.get("data_subject_categories"),
+        recipients=data.get("recipients"),
+        processors=data.get("processors"),
+        retention_period=data.get("retention_period"),
+        security_measures=data.get("security_measures"),
+        international_transfers=data.get("international_transfers"),
+    )
+    db.add(item)
+    log_security_event(
+        db,
+        action="privacy.processing_activity_created",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="processing_activity",
+        entity_id=item.activity_id,
+        metadata_json={"code": code},
+    )
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.get("/api/security-audit-logs")
+def get_security_audit_logs(
+    limit: int = Query(default=100, ge=1, le=500),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_public_db),
+) -> List[Dict[str, Any]]:
+    require_permission(user, "settings.read")
+    items = (
+        db.query(SecurityAuditLogModel)
+        .filter(
+            (SecurityAuditLogModel.company_id == user.company_id)
+            | (SecurityAuditLogModel.company_id.is_(None))
+        )
+        .order_by(SecurityAuditLogModel.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [model_to_dict(item) for item in items]
+
+
+@app.get("/api/privacy/export")
+def export_privacy_bundle(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+    company = first_or_404(
+        db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id),
+        "Company not found",
+    )
+    legal_acceptances = (
+        db.query(LegalAcceptanceModel)
+        .filter(LegalAcceptanceModel.company_id == user.company_id, LegalAcceptanceModel.user_id == user.user_id)
+        .order_by(LegalAcceptanceModel.accepted_at.desc())
+        .all()
+    )
+    log_security_event(
+        db,
+        action="privacy.export_generated",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="user",
+        entity_id=user.user_id,
+    )
+    db.commit()
+    return {
+        "user": serialize_user(user),
+        "company": model_to_dict(company),
+        "legal_acceptances": [model_to_dict(item) for item in legal_acceptances],
+        "generated_at": serialize_datetime(datetime.now(timezone.utc)),
+    }
+
+
+@app.post("/api/privacy/erasure-request")
+def create_erasure_request(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, str]:
+    log_security_event(
+        db,
+        action="privacy.erasure_requested",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="user",
+        entity_id=user.user_id,
+    )
+    db.commit()
+    return {"message": "Solicitud de supresion registrada para revision interna"}
+
+
+@app.post("/api/privacy/deactivate-account")
+def deactivate_account(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, str]:
+    log_security_event(
+        db,
+        action="privacy.account_deactivated_request",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="user",
+        entity_id=user.user_id,
+    )
+    db.commit()
+    return {"message": "Solicitud de desactivacion registrada para revision interna"}
+
+
 @app.post("/api/auth/register")
-def register(data: RegisterInput, response: Response, db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+def register(data: RegisterInput, request: Request, response: Response, db: Session = Depends(get_public_db)) -> Dict[str, Any]:
     existing = db.query(UserModel).filter(UserModel.email == data.email.lower()).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
+    if not data.accept_terms or not data.accept_privacy:
+        raise HTTPException(status_code=400, detail="Debes aceptar terminos y politica de privacidad")
 
     schema_name = slugify_schema_name(data.company_name)
     ensure_schema_exists(schema_name)
 
+    terms_document = get_latest_legal_document_by_code(db, "terms")
+    privacy_document = get_latest_legal_document_by_code(db, "privacy")
     company = CompanyModel(
         company_id=prefixed_id("comp"),
         schema_name=schema_name,
         name=data.company_name.strip(),
+        legal_name=data.company_name.strip(),
         tax_id=data.company_tax_id.strip() if data.company_tax_id else None,
         address=data.company_address.strip() if data.company_address else None,
         phone=data.company_phone.strip() if data.company_phone else None,
         email=data.company_email.lower() if data.company_email else None,
+        billing_email=data.company_email.lower() if data.company_email else data.email.lower(),
+        fiscal_series_config={"default": {"series": "F", "next_number": 1}},
+        verifactu_enabled=True,
+        aeat_submission_enabled=False,
     )
     user = UserModel(
         user_id=prefixed_id("user"),
@@ -1336,15 +2174,36 @@ def register(data: RegisterInput, response: Response, db: Session = Depends(get_
     db.commit()
     db.refresh(user)
     setattr(user, "company_schema", schema_name)
+    record_legal_acceptance(db, user.user_id, company.company_id, terms_document.code, terms_document.version, request)
+    record_legal_acceptance(db, user.user_id, company.company_id, privacy_document.code, privacy_document.version, request)
+    log_security_event(
+        db,
+        action="auth.register",
+        company_id=company.company_id,
+        user_id=user.user_id,
+        entity_type="company",
+        entity_id=company.company_id,
+        metadata_json={"schema_name": schema_name},
+    )
+    db.commit()
 
     tenant_db = TenantSessionLocal(bind=get_tenant_bind(schema_name))
     try:
+        apply_tenant_migrations(schema_name)
         warehouse = WarehouseModel(
             warehouse_id=prefixed_id("wh"),
             name="Almacen Principal",
             company_id=company.company_id,
         )
         tenant_db.add(warehouse)
+        log_system_event(
+            tenant_db,
+            user,
+            event_type="company.bootstrap",
+            entity_type="warehouse",
+            entity_id=warehouse.warehouse_id,
+            payload={"name": warehouse.name},
+        )
         tenant_db.commit()
     finally:
         tenant_db.close()
@@ -1363,17 +2222,38 @@ def login(data: LoginInput, response: Response, db: Session = Depends(get_public
         raise HTTPException(status_code=401, detail="Company not found")
     setattr(user, "company_schema", company.schema_name)
 
+    log_security_event(
+        db,
+        action="auth.login",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="user",
+        entity_id=user.user_id,
+        metadata_json={"email": user.email},
+    )
+    db.commit()
     set_auth_cookie(response, create_access_token(user))
     return serialize_user(user)
 
 
 @app.get("/api/auth/me")
-def get_me(user: UserModel = Depends(get_current_user)) -> Dict[str, Any]:
-    return serialize_user(user)
+def get_me(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+    data = serialize_user(user)
+    data["pending_legal_documents"] = get_required_legal_reacceptances(db, user)
+    return data
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response) -> Dict[str, str]:
+def logout(response: Response, user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, str]:
+    log_security_event(
+        db,
+        action="auth.logout",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="user",
+        entity_id=user.user_id,
+    )
+    db.commit()
     response.delete_cookie("session_token", path="/")
     return {"message": "Logged out"}
 
@@ -1401,7 +2281,12 @@ def reset_password(data: ResetPasswordInput, db: Session = Depends(get_public_db
 def get_companies(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
     require_permission(user, "settings.read")
     companies = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).all()
-    return [model_to_dict(company) for company in companies]
+    payload = []
+    for company in companies:
+        data = model_to_dict(company)
+        data["pending_legal_documents"] = get_required_legal_reacceptances(db, user)
+        payload.append(data)
+    return payload
 
 
 @app.put("/api/companies/{company_id}")
@@ -1414,9 +2299,30 @@ def update_company(
     require_permission(user, "settings.write")
     ensure_company_scope(user, company_id)
     company = first_or_404(db.query(CompanyModel).filter(CompanyModel.company_id == company_id), "Company not found")
-    for field in ["name", "tax_id", "address", "phone", "email"]:
+    for field in [
+        "name",
+        "legal_name",
+        "tax_id",
+        "address",
+        "country",
+        "phone",
+        "email",
+        "billing_email",
+        "fiscal_series_config",
+        "verifactu_enabled",
+        "aeat_submission_enabled",
+    ]:
         if field in data:
             setattr(company, field, data[field])
+    log_security_event(
+        db,
+        action="company.updated",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="company",
+        entity_id=company.company_id,
+        metadata_json={key: data.get(key) for key in data.keys()},
+    )
     db.commit()
     db.refresh(company)
     return model_to_dict(company)
@@ -1936,18 +2842,56 @@ def delete_order(order_id: str, user: UserModel = Depends(get_current_user), db:
     return {"message": "Deleted"}
 
 
+@app.get("/api/system-events")
+def get_system_events(
+    entity_type: Optional[str] = Query(default=None),
+    entity_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    if entity_type == "invoice":
+        require_permission(user, "sales.read")
+    else:
+        require_permission(user, "settings.read")
+    query = company_filter(db.query(SystemEventModel), SystemEventModel, user)
+    if entity_type:
+        query = query.filter(SystemEventModel.entity_type == entity_type)
+    if entity_id:
+        query = query.filter(SystemEventModel.entity_id == entity_id)
+    items = query.order_by(SystemEventModel.created_at.desc()).limit(limit).all()
+    return [model_to_dict(item) for item in items]
+
+
 @app.get("/api/invoices")
 def get_invoices(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     require_permission(user, "sales.read")
     items = company_filter(db.query(InvoiceModel), InvoiceModel, user).order_by(InvoiceModel.created_at.desc()).all()
-    return [enrich_invoice_like(item) for item in items]
+    return [enrich_invoice_like(item, user, db) for item in items]
 
 
 @app.get("/api/invoices/{invoice_id}")
 def get_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "sales.read")
     item = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
-    return enrich_invoice_like(item)
+    return enrich_invoice_like(item, user, db)
+
+
+@app.get("/api/invoices/{invoice_id}/pdf")
+def get_invoice_pdf(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> StreamingResponse:
+    require_permission(user, "sales.read")
+    invoice = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
+    with PublicSessionLocal() as public_db:
+        company = first_or_404(
+            public_db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id),
+            "Company not found",
+        )
+    pdf_bytes = build_invoice_pdf_bytes(invoice, company)
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{invoice.invoice_number}.pdf"'},
+    )
 
 
 @app.post("/api/invoices")
@@ -1975,64 +2919,266 @@ def create_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_u
     items, subtotal = build_line_items(raw_items, products_by_id)
     warehouse_id = resolve_warehouse_id(user, db, data.get("warehouse_id") or (source_order.warehouse_id if source_order else None))
     tax = subtotal * 0.21
-    adjust_inventory_stock(db, user, items, warehouse_id, movement="out")
+    series = (data.get("series") or "F").strip().upper()
+    invoice_type = (data.get("invoice_type") or "complete").strip().lower()
+    simplified = bool(data.get("simplified", False))
+    next_number = get_next_invoice_number(series, user, db)
 
     item = InvoiceModel(
         invoice_id=prefixed_id("inv"),
-        invoice_number=generate_sequence("FAC", InvoiceModel, user.company_id, db),
+        series=series,
+        number=next_number,
+        invoice_number=f"{series}-{str(next_number).zfill(6)}",
         client_id=client.client_id,
         client_name=client.name,
         order_id=source_order.order_id if source_order else data.get("order_id"),
+        issue_date=parse_iso_datetime(data.get("issue_date")) or datetime.now(timezone.utc),
+        operation_date=parse_iso_datetime(data.get("operation_date")) or datetime.now(timezone.utc),
+        invoice_type=invoice_type,
+        simplified=simplified,
+        rectified_invoice_id=data.get("rectified_invoice_id"),
         items=items,
         subtotal=subtotal,
         tax=tax,
         total=subtotal + tax,
-        status=data.get("status", "pending"),
+        currency=data.get("currency", "EUR"),
+        status="issued",
+        immutable_at=datetime.now(timezone.utc),
         due_date=parse_iso_datetime(data.get("due_date")),
         company_id=user.company_id,
     )
+    adjust_inventory_stock(db, user, items, warehouse_id, movement="out")
     db.add(item)
+    with PublicSessionLocal() as public_db:
+        company = first_or_404(
+            public_db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id),
+            "Company not found",
+        )
+        create_invoice_record(db, user, company, item, "alta")
+    log_system_event(
+        db,
+        user,
+        event_type="invoice.issued",
+        entity_type="invoice",
+        entity_id=item.invoice_id,
+        payload={"invoice_number": item.invoice_number, "total": item.total, "series": item.series, "number": item.number},
+    )
     db.commit()
     db.refresh(item)
-    return enrich_invoice_like(item)
+    return enrich_invoice_like(item, user, db)
 
 
 @app.put("/api/invoices/{invoice_id}")
 def update_invoice(invoice_id: str, data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "sales.write")
     item = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
+    forbidden_fields = {"items", "subtotal", "tax", "total", "client_id", "client_name", "series", "number", "invoice_number"}
+    if any(field in data for field in forbidden_fields):
+        raise HTTPException(status_code=400, detail="Issued invoices are immutable. Use a rectificative invoice instead.")
     if "status" in data:
         item.status = data["status"]
     if data.get("due_date"):
         item.due_date = parse_iso_datetime(data["due_date"])
     if data.get("status") == "paid" and not item.paid_date:
         item.paid_date = datetime.now(timezone.utc)
+    log_system_event(
+        db,
+        user,
+        event_type="invoice.updated",
+        entity_type="invoice",
+        entity_id=item.invoice_id,
+        payload={"status": item.status, "due_date": serialize_datetime(item.due_date)},
+    )
     db.commit()
     db.refresh(item)
-    return enrich_invoice_like(item)
+    return enrich_invoice_like(item, user, db)
 
 
 @app.delete("/api/invoices/{invoice_id}")
 def delete_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "sales.write")
-    item = first_or_404(
+    raise HTTPException(status_code=400, detail="Issued invoices cannot be deleted. Use cancellation or rectification.")
+
+
+@app.post("/api/invoices/{invoice_id}/cancel")
+def cancel_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "sales.write")
+    item = first_or_404(company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id), "Invoice not found")
+    if item.status == "cancelled":
+        raise HTTPException(status_code=400, detail="Invoice already cancelled")
+    item.status = "cancelled"
+    with PublicSessionLocal() as public_db:
+        company = first_or_404(
+            public_db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id),
+            "Company not found",
+        )
+        create_invoice_record(db, user, company, item, "anulacion", {"cancelled_at": serialize_datetime(datetime.now(timezone.utc))})
+    log_system_event(
+        db,
+        user,
+        event_type="invoice.cancelled",
+        entity_type="invoice",
+        entity_id=item.invoice_id,
+        payload={"invoice_number": item.invoice_number},
+    )
+    db.commit()
+    db.refresh(item)
+    return enrich_invoice_like(item, user, db)
+
+
+@app.post("/api/invoices/{invoice_id}/rectify")
+def rectify_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "sales.write")
+    source_invoice = first_or_404(
         company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id),
         "Invoice not found",
     )
-    existing_return = company_filter(db.query(ReturnModel), ReturnModel, user).filter(
-        ReturnModel.return_type == "sales", ReturnModel.source_document_id == item.invoice_id
-    ).first()
-    if existing_return:
-        raise HTTPException(
-            status_code=400,
-            detail="This invoice already has linked returns. Cancel the linked return before deleting the invoice.",
+    series = "R"
+    next_number = get_next_invoice_number(series, user, db)
+    rectified_items = []
+    subtotal = 0.0
+    for item in source_invoice.items or []:
+        quantity = int(item.get("quantity", 0) or 0)
+        price = float(item.get("price", 0) or 0)
+        total = quantity * price * -1
+        rectified_items.append(
+            {
+                "product_id": item.get("product_id"),
+                "product_name": item.get("product_name"),
+                "quantity": quantity,
+                "price": price * -1,
+                "total": total,
+            }
         )
-
-    warehouse_id = get_invoice_inventory_warehouse_id(db, user, item, "sales")
-    adjust_inventory_stock(db, user, item.items or [], warehouse_id, movement="in")
-    db.delete(item)
+        subtotal += total
+    rectified_invoice = InvoiceModel(
+        invoice_id=prefixed_id("inv"),
+        series=series,
+        number=next_number,
+        invoice_number=f"{series}-{str(next_number).zfill(6)}",
+        client_id=source_invoice.client_id,
+        client_name=source_invoice.client_name,
+        order_id=source_invoice.order_id,
+        issue_date=datetime.now(timezone.utc),
+        operation_date=datetime.now(timezone.utc),
+        invoice_type="rectificativa",
+        simplified=False,
+        rectified_invoice_id=source_invoice.invoice_id,
+        items=rectified_items,
+        subtotal=subtotal,
+        tax=round(subtotal * 0.21, 2),
+        total=round(subtotal * 1.21, 2),
+        currency=source_invoice.currency or "EUR",
+        status="issued",
+        immutable_at=datetime.now(timezone.utc),
+        due_date=source_invoice.due_date,
+        company_id=user.company_id,
+    )
+    db.add(rectified_invoice)
+    with PublicSessionLocal() as public_db:
+        company = first_or_404(
+            public_db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id),
+            "Company not found",
+        )
+        create_invoice_record(
+            db,
+            user,
+            company,
+            rectified_invoice,
+            "alta",
+            {"rectifies": source_invoice.invoice_number},
+        )
+    log_system_event(
+        db,
+        user,
+        event_type="invoice.rectified",
+        entity_type="invoice",
+        entity_id=rectified_invoice.invoice_id,
+        payload={"source_invoice_id": source_invoice.invoice_id, "invoice_number": rectified_invoice.invoice_number},
+    )
     db.commit()
-    return {"message": "Deleted and inventory restored"}
+    db.refresh(rectified_invoice)
+    return enrich_invoice_like(rectified_invoice, user, db)
+
+
+@app.get("/api/invoices/{invoice_id}/records")
+def get_invoice_records(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "sales.read")
+    records = (
+        company_filter(db.query(InvoiceRecordModel), InvoiceRecordModel, user)
+        .filter(InvoiceRecordModel.invoice_id == invoice_id)
+        .order_by(InvoiceRecordModel.generated_at.asc())
+        .all()
+    )
+    return [model_to_dict(record) for record in records]
+
+
+@app.get("/api/invoices/{invoice_id}/record-export")
+def export_invoice_records(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> StreamingResponse:
+    require_permission(user, "sales.read")
+    records = (
+        company_filter(db.query(InvoiceRecordModel), InvoiceRecordModel, user)
+        .filter(InvoiceRecordModel.invoice_id == invoice_id)
+        .order_by(InvoiceRecordModel.generated_at.asc())
+        .all()
+    )
+    if not records:
+        raise HTTPException(status_code=404, detail="No fiscal records found")
+    log_system_event(
+        db,
+        user,
+        event_type="invoice.records_exported",
+        entity_type="invoice",
+        entity_id=invoice_id,
+        payload={"records": len(records)},
+    )
+    db.commit()
+    payload = json.dumps([model_to_dict(record) for record in records], ensure_ascii=False, indent=2).encode("utf-8")
+    return StreamingResponse(
+        io.BytesIO(payload),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=invoice-records-{invoice_id}.json"},
+    )
+
+
+@app.get("/api/verifactu/records/export")
+def export_verifactu_records(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> StreamingResponse:
+    require_permission(user, "reports.read")
+    records = (
+        company_filter(db.query(InvoiceRecordModel), InvoiceRecordModel, user)
+        .order_by(InvoiceRecordModel.generated_at.asc())
+        .all()
+    )
+    with PublicSessionLocal() as public_db:
+        company = first_or_404(
+            public_db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id),
+            "Company not found",
+        )
+        company_payload = {
+            "company_id": company.company_id,
+            "name": company.legal_name or company.name,
+            "tax_id": company.tax_id,
+            "verifactu_enabled": company.verifactu_enabled,
+            "aeat_submission_enabled": company.aeat_submission_enabled,
+        }
+    payload = build_verifactu_export(company_payload, [model_to_dict(record) for record in records])
+    adapter_status = get_aeat_adapter().submit_invoice_record(payload)
+    payload["aeat_adapter_status"] = adapter_status
+    log_system_event(
+        db,
+        user,
+        event_type="verifactu.records_exported",
+        entity_type="invoice_record",
+        entity_id=user.company_id,
+        payload={"records": len(records)},
+    )
+    db.commit()
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    return StreamingResponse(
+        io.BytesIO(encoded),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="verifactu-records.json"'},
+    )
 
 
 @app.get("/api/purchase-orders")
@@ -2162,24 +3308,10 @@ def update_purchase_invoice(pinv_id: str, data: Dict[str, Any], user: UserModel 
 @app.delete("/api/purchase-invoices/{pinv_id}")
 def delete_purchase_invoice(pinv_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "purchases.write")
-    item = first_or_404(
-        company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.pinv_id == pinv_id),
-        "Purchase invoice not found",
+    raise HTTPException(
+        status_code=400,
+        detail="Purchase invoices cannot be deleted once recorded. Use returns and mark the document as cancelled in your accounting flow.",
     )
-    existing_return = company_filter(db.query(ReturnModel), ReturnModel, user).filter(
-        ReturnModel.return_type == "purchase", ReturnModel.source_document_id == item.pinv_id
-    ).first()
-    if existing_return:
-        raise HTTPException(
-            status_code=400,
-            detail="This purchase invoice already has linked returns. Cancel the linked return before deleting the invoice.",
-        )
-
-    warehouse_id = get_invoice_inventory_warehouse_id(db, user, item, "purchase")
-    adjust_inventory_stock(db, user, item.items or [], warehouse_id, movement="out")
-    db.delete(item)
-    db.commit()
-    return {"message": "Deleted and inventory restored"}
 
 
 @app.get("/api/returns")

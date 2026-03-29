@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { Eye, Plus, Search, Trash2 } from "lucide-react";
+import { Eye, FileDown, FileText, Plus, Search, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import Layout from "@/components/layout/Layout";
@@ -35,9 +35,14 @@ const Invoices = () => {
   const [search, setSearch] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [viewInvoice, setViewInvoice] = useState(null);
+  const [invoiceRecords, setInvoiceRecords] = useState([]);
+  const [invoiceEvents, setInvoiceEvents] = useState([]);
   const [formData, setFormData] = useState({
     client_id: "",
     order_id: "",
+    series: "F",
+    invoice_type: "complete",
+    simplified: false,
     due_date: "",
     items: [],
   });
@@ -170,19 +175,66 @@ const Invoices = () => {
     }
   };
 
-  const handleDelete = async (invoiceId) => {
-    if (!window.confirm("Estas seguro de eliminar esta factura?")) return;
+  const handleCancelInvoice = async (invoiceId) => {
     try {
-      await axios.delete(`${API}/invoices/${invoiceId}`, { withCredentials: true });
-      toast.success("Factura eliminada y stock revertido");
+      await axios.post(`${API}/invoices/${invoiceId}/cancel`, {}, { withCredentials: true });
+      toast.success("Factura anulada");
       fetchData();
     } catch (error) {
-      toast.error(error.response?.data?.detail || "Error al eliminar factura");
+      toast.error(error.response?.data?.detail || "No se pudo anular la factura");
+    }
+  };
+
+  const handleRectifyInvoice = async (invoiceId) => {
+    try {
+      await axios.post(`${API}/invoices/${invoiceId}/rectify`, {}, { withCredentials: true });
+      toast.success("Factura rectificativa generada");
+      fetchData();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo crear la rectificativa");
+    }
+  };
+
+  const handleExportFiscalRecord = async (invoiceId) => {
+    try {
+      const response = await axios.get(`${API}/invoices/${invoiceId}/record-export`, {
+        withCredentials: true,
+        responseType: "blob",
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `invoice-records-${invoiceId}.json`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Registro fiscal exportado");
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo exportar el registro fiscal");
+    }
+  };
+
+  const handleViewInvoice = async (invoice) => {
+    setViewInvoice(invoice);
+    try {
+      const [recordsResponse, eventsResponse] = await Promise.all([
+        axios.get(`${API}/invoices/${invoice.invoice_id}/records`, { withCredentials: true }),
+        axios.get(`${API}/system-events`, {
+          withCredentials: true,
+          params: { entity_type: "invoice", entity_id: invoice.invoice_id },
+        }),
+      ]);
+      setInvoiceRecords(recordsResponse.data);
+      setInvoiceEvents(eventsResponse.data);
+    } catch (error) {
+      setInvoiceRecords([]);
+      setInvoiceEvents([]);
     }
   };
 
   const resetForm = () => {
-    setFormData({ client_id: "", order_id: "", due_date: "", items: [] });
+    setFormData({ client_id: "", order_id: "", series: "F", invoice_type: "complete", simplified: false, due_date: "", items: [] });
     setNewItem({ product_id: "", quantity: 1, price: 0 });
   };
 
@@ -257,6 +309,22 @@ const Invoices = () => {
               </DialogHeader>
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div>
+                    <Label>Serie</Label>
+                    <Input value={formData.series} onChange={(event) => setFormData({ ...formData, series: event.target.value.toUpperCase() })} />
+                  </div>
+                  <div>
+                    <Label>Tipo</Label>
+                    <Select value={formData.invoice_type} onValueChange={(value) => setFormData({ ...formData, invoice_type: value })}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="complete">Completa</SelectItem>
+                        <SelectItem value="simplified">Simplificada</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                   <div>
                     <Label>Origen del documento</Label>
                     <Select value={formData.order_id || "manual"} onValueChange={handleOrderChange}>
@@ -386,7 +454,16 @@ const Invoices = () => {
           </Dialog>
         </div>
 
-        <Dialog open={!!viewInvoice} onOpenChange={() => setViewInvoice(null)}>
+        <Dialog
+          open={!!viewInvoice}
+          onOpenChange={(open) => {
+            if (!open) {
+              setViewInvoice(null);
+              setInvoiceRecords([]);
+              setInvoiceEvents([]);
+            }
+          }}
+        >
           <DialogContent className="max-w-2xl">
             <DialogHeader>
               <DialogTitle>Factura {viewInvoice?.invoice_number}</DialogTitle>
@@ -399,8 +476,18 @@ const Invoices = () => {
                     <p className="font-medium">{viewInvoice.client_name}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-muted-foreground">Estado</p>
+                    <p className="text-sm text-muted-foreground">Estado fiscal</p>
                     <span className={`status-badge status-${viewInvoice.status}`}>{viewInvoice.status}</span>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Tipo</p>
+                    <p className="font-medium">{viewInvoice.invoice_type || "complete"}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-muted-foreground">Inmutable desde</p>
+                    <p className="font-medium">
+                      {viewInvoice.immutable_at ? new Date(viewInvoice.immutable_at).toLocaleString("es-ES") : "-"}
+                    </p>
                   </div>
                 </div>
                 <table className="w-full text-sm">
@@ -437,6 +524,52 @@ const Invoices = () => {
                     </tr>
                   </tfoot>
                 </table>
+                <div className="space-y-2 rounded-lg border p-4">
+                  <div className="flex items-center justify-between">
+                    <p className="font-medium">Historial fiscal / VERI*FACTU</p>
+                    <Button variant="outline" size="sm" onClick={() => handleExportFiscalRecord(viewInvoice.invoice_id)}>
+                      <FileDown className="mr-2 h-4 w-4" />
+                      Exportar registro
+                    </Button>
+                  </div>
+                  {invoiceRecords.length > 0 ? (
+                    <div className="space-y-2 text-sm">
+                      {invoiceRecords.map((record) => (
+                        <div key={record.record_id} className="rounded-md border border-border p-3">
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium">{record.record_type}</span>
+                            <span className="text-muted-foreground">
+                              {new Date(record.generated_at).toLocaleString("es-ES")}
+                            </span>
+                          </div>
+                          <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{record.hash_current}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Sin registros disponibles</p>
+                  )}
+                </div>
+                <div className="space-y-2 rounded-lg border p-4">
+                  <p className="font-medium">Historial de eventos</p>
+                  {invoiceEvents.length > 0 ? (
+                    <div className="space-y-2 text-sm">
+                      {invoiceEvents.map((event) => (
+                        <div key={event.event_id} className="rounded-md border border-border p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="font-medium">{event.event_type}</span>
+                            <span className="text-muted-foreground">
+                              {new Date(event.created_at).toLocaleString("es-ES")}
+                            </span>
+                          </div>
+                          <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{event.hash_current}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">Sin eventos disponibles</p>
+                  )}
+                </div>
               </div>
             )}
           </DialogContent>
@@ -458,6 +591,8 @@ const Invoices = () => {
                       <th>Origen</th>
                       <th>Fecha</th>
                       <th>Vencimiento</th>
+                      <th>Serie</th>
+                      <th>Fiscal</th>
                       <th className="text-right">Total</th>
                       <th className="text-right">Pendiente</th>
                       <th>Estado</th>
@@ -476,6 +611,13 @@ const Invoices = () => {
                         <td className="text-sm text-muted-foreground">
                           {invoice.due_date ? new Date(invoice.due_date).toLocaleDateString("es-ES") : "-"}
                         </td>
+                        <td className="font-mono text-sm">{invoice.series || "F"}</td>
+                        <td>
+                          <div className="inline-flex items-center gap-2 text-xs">
+                            <ShieldAlert className="h-4 w-4 text-primary" />
+                            <span>{invoice.fiscal_record_status || "alta"}</span>
+                          </div>
+                        </td>
                         <td className="text-right font-mono">{formatCurrency(invoice.total)}</td>
                         <td className="text-right font-mono">{formatCurrency(invoice.outstanding_amount)}</td>
                         <td>
@@ -493,11 +635,17 @@ const Invoices = () => {
                           </Select>
                         </td>
                         <td className="text-right">
-                          <Button variant="ghost" size="icon" onClick={() => setViewInvoice(invoice)}>
+                          <Button variant="ghost" size="icon" onClick={() => handleViewInvoice(invoice)}>
                             <Eye className="h-4 w-4" />
                           </Button>
-                          <Button variant="ghost" size="icon" onClick={() => handleDelete(invoice.invoice_id)}>
-                            <Trash2 className="h-4 w-4 text-destructive" />
+                          <Button variant="ghost" size="icon" onClick={() => window.open(`${API}/invoices/${invoice.invoice_id}/pdf`, "_blank")}>
+                            <FileText className="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" onClick={() => handleRectifyInvoice(invoice.invoice_id)}>
+                            <FileDown className="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" onClick={() => handleCancelInvoice(invoice.invoice_id)}>
+                            <ShieldAlert className="h-4 w-4 text-destructive" />
                           </Button>
                         </td>
                       </tr>
