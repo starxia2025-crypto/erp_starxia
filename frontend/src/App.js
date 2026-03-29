@@ -30,11 +30,38 @@ import AIAssistant from "@/pages/AIAssistant";
 import LegalDocumentPage from "@/pages/LegalDocumentPage";
 
 const API = API_BASE;
+const THEME_STORAGE_KEY = "starxia-theme";
 
 // Auth Context
 const AuthContext = createContext(null);
+const ThemeContext = createContext(null);
 
 export const useAuth = () => useContext(AuthContext);
+export const useTheme = () => useContext(ThemeContext);
+
+export const ThemeProvider = ({ children }) => {
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === "undefined") return "dark";
+    return window.localStorage.getItem(THEME_STORAGE_KEY) || "dark";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle("dark", theme === "dark");
+    root.style.colorScheme = theme;
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  }, []);
+
+  return (
+    <ThemeContext.Provider value={{ theme, setTheme, toggleTheme }}>
+      {children}
+    </ThemeContext.Provider>
+  );
+};
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -133,10 +160,12 @@ function App() {
   return (
     <div className="App">
       <BrowserRouter>
-        <AuthProvider>
-          <AppRouter />
-          <Toaster position="top-right" />
-        </AuthProvider>
+        <ThemeProvider>
+          <AuthProvider>
+            <AppRouter />
+            <Toaster position="top-right" />
+          </AuthProvider>
+        </ThemeProvider>
       </BrowserRouter>
     </div>
   );

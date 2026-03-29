@@ -10,6 +10,8 @@ import {
   Settings,
   Bot,
   ChevronDown,
+  Moon,
+  Sun,
 } from "lucide-react";
 import {
   Collapsible,
@@ -17,11 +19,13 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { useState } from "react";
-import { useAuth } from "@/App";
+import { useAuth, useTheme } from "@/App";
 import { canAccessAny, hasPermission } from "@/lib/permissions";
+import { Button } from "@/components/ui/button";
 
 const Sidebar = ({ currentPath }) => {
   const { user } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const [clientsOpen, setClientsOpen] = useState(currentPath.includes("/client"));
   const [suppliersOpen, setSuppliersOpen] = useState(currentPath.includes("/supplier"));
   const [inventoryOpen, setInventoryOpen] = useState(
@@ -43,23 +47,37 @@ const Sidebar = ({ currentPath }) => {
   return (
     <aside className="w-64 min-h-screen bg-card border-r border-border flex flex-col">
       <div className="p-6 border-b border-border">
-        <Link to="/dashboard" className="flex items-center gap-2">
-          {companyLogoUrl ? (
-            <img
-              src={companyLogoUrl}
-              alt={companyName}
-              className="h-10 w-10 rounded-md border border-border object-cover"
-            />
-          ) : (
-            <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary">
-              <span className="text-sm font-bold text-primary-foreground">{companyInitials}</span>
+        <div className="flex items-start justify-between gap-3">
+          <Link to="/dashboard" className="flex min-w-0 items-center gap-2">
+            {companyLogoUrl ? (
+              <img
+                src={companyLogoUrl}
+                alt={companyName}
+                className="h-10 w-10 rounded-md border border-border object-cover"
+              />
+            ) : (
+              <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary">
+                <span className="text-sm font-bold text-primary-foreground">{companyInitials}</span>
+              </div>
+            )}
+            <div className="min-w-0">
+              <span className="block truncate font-semibold text-lg">{companyName}</span>
+              <span className="block truncate text-xs text-muted-foreground">ERP Starxia</span>
             </div>
-          )}
-          <div className="min-w-0">
-            <span className="block truncate font-semibold text-lg">{companyName}</span>
-            <span className="block truncate text-xs text-muted-foreground">ERP Starxia</span>
-          </div>
-        </Link>
+          </Link>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="shrink-0 rounded-full border-border/70 bg-background/70 shadow-sm transition-all hover:shadow-md"
+            onClick={toggleTheme}
+            aria-label={theme === "dark" ? "Cambiar a tema claro" : "Cambiar a tema oscuro"}
+            title={theme === "dark" ? "Cambiar a tema claro" : "Cambiar a tema oscuro"}
+          >
+            {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </Button>
+        </div>
       </div>
 
       <nav className="flex-1 p-4 space-y-1 overflow-y-auto">

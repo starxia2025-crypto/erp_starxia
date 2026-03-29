@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { Bot, Building2, FileText, Package, Shield, Users, BarChart3, KeyRound } from "lucide-react";
 
-import { useAuth } from "@/App";
+import { useAuth, useTheme } from "@/App";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -30,9 +30,6 @@ const initialRegister = {
 const initialForgotPassword = { email: "" };
 const initialResetPassword = { new_password: "", confirm_password: "" };
 const initialConsents = { terms: false, privacy: false };
-const authInputClassName =
-  "border-white/15 bg-white/5 text-white placeholder:text-zinc-500 caret-white autofill:bg-transparent";
-
 const features = [
   {
     icon: Users,
@@ -68,6 +65,7 @@ const features = [
 
 const Landing = () => {
   const { user, setUser } = useAuth();
+  const { theme } = useTheme();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const resetToken = searchParams.get("reset_token") || "";
@@ -81,6 +79,10 @@ const Landing = () => {
   const [resettingPassword, setResettingPassword] = useState(false);
   const [consents, setConsents] = useState(initialConsents);
   const [legalDocuments, setLegalDocuments] = useState([]);
+  const isDark = theme === "dark";
+  const authInputClassName = isDark
+    ? "border-white/15 bg-white/5 text-white placeholder:text-zinc-500 caret-white autofill:bg-transparent"
+    : "border-zinc-300 bg-white text-zinc-900 placeholder:text-zinc-500 caret-primary";
 
   const hasResetToken = useMemo(() => Boolean(resetToken), [resetToken]);
 
@@ -184,7 +186,13 @@ const Landing = () => {
   return (
     <div className="min-h-screen bg-background">
       <div className="relative overflow-hidden border-b border-border">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,_rgba(255,85,0,0.16),_transparent_35%),linear-gradient(135deg,#0f0f11_0%,#17171a_60%,#111114_100%)]" />
+        <div
+          className={`absolute inset-0 ${
+            isDark
+              ? "bg-[radial-gradient(circle_at_top_left,_rgba(255,85,0,0.16),_transparent_35%),linear-gradient(135deg,#0f0f11_0%,#17171a_60%,#111114_100%)]"
+              : "bg-[radial-gradient(circle_at_top_left,_rgba(255,140,72,0.16),_transparent_30%),linear-gradient(135deg,#fffaf5_0%,#fff5ed_45%,#fffdf9_100%)]"
+          }`}
+        />
         <div className="relative mx-auto grid max-w-7xl gap-10 px-6 py-16 lg:grid-cols-[1.15fr_0.85fr] lg:items-center lg:py-24">
           <div>
             <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-4 py-2 text-sm text-primary">
@@ -192,28 +200,39 @@ const Landing = () => {
               ERP Starxia para operativa real
             </div>
 
-            <h1 className="mb-6 max-w-3xl text-4xl font-bold leading-tight text-white sm:text-5xl lg:text-6xl">
+            <h1 className={`mb-6 max-w-3xl text-4xl font-bold leading-tight sm:text-5xl lg:text-6xl ${isDark ? "text-white" : "text-zinc-950"}`}>
               Gestiona ventas, compras e inventario desde un unico panel.
             </h1>
 
-            <p className="mb-8 max-w-2xl text-lg text-zinc-300">
+            <p className={`mb-8 max-w-2xl text-lg ${isDark ? "text-zinc-300" : "text-zinc-600"}`}>
               Esta base ya nace orientada a ERP: multiempresa, multiusuario, almacenes, documentos de venta y compra, reportes y asistente IA.
             </p>
 
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {features.map((feature) => (
-                <div key={feature.title} className="rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
+                <div
+                  key={feature.title}
+                  className={`rounded-2xl border p-4 backdrop-blur-sm ${
+                    isDark ? "border-white/10 bg-white/5" : "border-zinc-200/80 bg-white/80 shadow-sm"
+                  }`}
+                >
                   <feature.icon className="mb-3 h-5 w-5 text-primary" />
-                  <h3 className="mb-1 font-semibold text-white">{feature.title}</h3>
-                  <p className="text-sm text-zinc-400">{feature.description}</p>
+                  <h3 className={`mb-1 font-semibold ${isDark ? "text-white" : "text-zinc-900"}`}>{feature.title}</h3>
+                  <p className={`text-sm ${isDark ? "text-zinc-400" : "text-zinc-600"}`}>{feature.description}</p>
                 </div>
               ))}
             </div>
           </div>
 
-          <Card className="border-white/10 bg-zinc-950/80 shadow-2xl shadow-black/30">
+          <Card
+            className={`shadow-2xl ${
+              isDark
+                ? "border-white/10 bg-zinc-950/80 shadow-black/30"
+                : "border-zinc-200/70 bg-white/92 shadow-orange-100/70"
+            }`}
+          >
             <CardHeader>
-              <CardTitle className="text-2xl text-white">
+              <CardTitle className={`text-2xl ${isDark ? "text-white" : "text-zinc-950"}`}>
                 {hasResetToken ? "Restablecer contrasena" : "Acceso privado"}
               </CardTitle>
               <CardDescription>
@@ -226,7 +245,7 @@ const Landing = () => {
               {hasResetToken ? (
                 <form className="space-y-4" onSubmit={handleResetPassword}>
                   <div className="space-y-2">
-                    <Label htmlFor="reset-password" className="text-zinc-200">Nueva contrasena</Label>
+                    <Label htmlFor="reset-password" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Nueva contrasena</Label>
                     <Input
                       id="reset-password"
                       type="password"
@@ -239,7 +258,7 @@ const Landing = () => {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="reset-password-confirm" className="text-zinc-200">Confirmar contrasena</Label>
+                    <Label htmlFor="reset-password-confirm" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Confirmar contrasena</Label>
                     <Input
                       id="reset-password-confirm"
                       type="password"
@@ -257,7 +276,7 @@ const Landing = () => {
                   <Button
                     type="button"
                     variant="ghost"
-                    className="w-full text-zinc-300"
+                    className={`w-full ${isDark ? "text-zinc-300" : "text-zinc-600"}`}
                     onClick={() => setSearchParams({})}
                   >
                     Volver al acceso
@@ -273,7 +292,7 @@ const Landing = () => {
                   <TabsContent value="login" className="space-y-6">
                     <form className="space-y-4" onSubmit={handleLogin}>
                       <div className="space-y-2">
-                        <Label htmlFor="login-email" className="text-zinc-200">Email</Label>
+                        <Label htmlFor="login-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Email</Label>
                         <Input
                           id="login-email"
                           type="email"
@@ -285,7 +304,7 @@ const Landing = () => {
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor="login-password" className="text-zinc-200">Contrasena</Label>
+                        <Label htmlFor="login-password" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Contrasena</Label>
                         <Input
                           id="login-password"
                           type="password"
@@ -301,8 +320,8 @@ const Landing = () => {
                       </Button>
                     </form>
 
-                    <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-                      <div className="mb-3 flex items-center gap-2 text-sm font-medium text-white">
+                    <div className={`rounded-xl border p-4 ${isDark ? "border-white/10 bg-white/5" : "border-zinc-200 bg-zinc-50"}`}>
+                      <div className={`mb-3 flex items-center gap-2 text-sm font-medium ${isDark ? "text-white" : "text-zinc-900"}`}>
                         <KeyRound className="h-4 w-4 text-primary" />
                         Olvide mi contrasena
                       </div>
@@ -325,7 +344,7 @@ const Landing = () => {
                   <TabsContent value="register">
                     <form className="space-y-4" onSubmit={handleRegister}>
                       <div className="space-y-2">
-                        <Label htmlFor="register-company" className="text-zinc-200">Empresa</Label>
+                        <Label htmlFor="register-company" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Empresa</Label>
                         <Input
                           id="register-company"
                           value={registerForm.company_name}
@@ -337,7 +356,7 @@ const Landing = () => {
                       </div>
                       <div className="grid gap-4 md:grid-cols-2">
                         <div className="space-y-2">
-                          <Label htmlFor="register-company-email" className="text-zinc-200">Email de empresa</Label>
+                          <Label htmlFor="register-company-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Email de empresa</Label>
                           <Input
                             id="register-company-email"
                             type="email"
@@ -348,7 +367,7 @@ const Landing = () => {
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label htmlFor="register-company-phone" className="text-zinc-200">Telefono de empresa</Label>
+                          <Label htmlFor="register-company-phone" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Telefono de empresa</Label>
                           <Input
                             id="register-company-phone"
                             value={registerForm.company_phone}
@@ -360,7 +379,7 @@ const Landing = () => {
                       </div>
                       <div className="grid gap-4 md:grid-cols-2">
                         <div className="space-y-2">
-                          <Label htmlFor="register-company-tax-id" className="text-zinc-200">NIF/CIF</Label>
+                          <Label htmlFor="register-company-tax-id" className={isDark ? "text-zinc-200" : "text-zinc-700"}>NIF/CIF</Label>
                           <Input
                             id="register-company-tax-id"
                             value={registerForm.company_tax_id}
@@ -370,7 +389,7 @@ const Landing = () => {
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label htmlFor="register-name" className="text-zinc-200">Nombre del admin</Label>
+                          <Label htmlFor="register-name" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Nombre del admin</Label>
                           <Input
                             id="register-name"
                             value={registerForm.name}
@@ -382,7 +401,7 @@ const Landing = () => {
                         </div>
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor="register-company-address" className="text-zinc-200">Direccion</Label>
+                        <Label htmlFor="register-company-address" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Direccion</Label>
                         <Input
                           id="register-company-address"
                           value={registerForm.company_address}
@@ -392,7 +411,7 @@ const Landing = () => {
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor="register-email" className="text-zinc-200">Email de acceso</Label>
+                        <Label htmlFor="register-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Email de acceso</Label>
                         <Input
                           id="register-email"
                           type="email"
@@ -404,7 +423,7 @@ const Landing = () => {
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor="register-password" className="text-zinc-200">Contrasena</Label>
+                        <Label htmlFor="register-password" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Contrasena</Label>
                         <Input
                           id="register-password"
                           type="password"
@@ -416,7 +435,11 @@ const Landing = () => {
                           required
                         />
                       </div>
-                      <div className="space-y-3 rounded-xl border border-white/10 bg-white/5 p-4 text-sm text-zinc-300">
+                      <div
+                        className={`space-y-3 rounded-xl border p-4 text-sm ${
+                          isDark ? "border-white/10 bg-white/5 text-zinc-300" : "border-zinc-200 bg-zinc-50 text-zinc-700"
+                        }`}
+                      >
                         <label className="flex items-start gap-3">
                           <input
                             type="checkbox"
