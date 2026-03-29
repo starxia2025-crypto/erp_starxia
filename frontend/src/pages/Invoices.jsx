@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import axios from "axios";
-import { Eye, FileDown, FileText, Plus, Search, ShieldAlert } from "lucide-react";
+import { Eye, FileDown, FileText, Plus, Search, ShieldAlert, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import Layout from "@/components/layout/Layout";
