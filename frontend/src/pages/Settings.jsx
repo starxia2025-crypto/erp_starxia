@@ -64,6 +64,8 @@ const Settings = () => {
   const [savingCompany, setSavingCompany] = useState(false);
   const [savingEmployee, setSavingEmployee] = useState(false);
   const [updatingUserId, setUpdatingUserId] = useState(null);
+  const [uploadingCompanyLogo, setUploadingCompanyLogo] = useState(false);
+  const [uploadingProfilePicture, setUploadingProfilePicture] = useState(false);
   const [formData, setFormData] = useState({
     name: "",
     legal_name: "",
@@ -210,6 +212,52 @@ const Settings = () => {
     }
   };
 
+  const handleCompanyLogoUpload = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !company || !canEditCompany) return;
+
+    const form = new FormData();
+    form.append("file", file);
+    setUploadingCompanyLogo(true);
+    try {
+      const response = await axios.post(`${API}/companies/${company.company_id}/logo`, form, {
+        withCredentials: true,
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setCompany(response.data);
+      setFormData((current) => ({ ...current, logo_url: response.data.logo_url || "" }));
+      await checkAuth();
+      toast.success("Logo de empresa actualizado");
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo subir el logo");
+    } finally {
+      setUploadingCompanyLogo(false);
+    }
+  };
+
+  const handleProfilePictureUpload = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    const form = new FormData();
+    form.append("file", file);
+    setUploadingProfilePicture(true);
+    try {
+      await axios.post(`${API}/users/me/picture`, form, {
+        withCredentials: true,
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      await checkAuth();
+      toast.success("Foto de perfil actualizada");
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo subir la foto de perfil");
+    } finally {
+      setUploadingProfilePicture(false);
+    }
+  };
+
   const handleRoleChange = async (employeeId, role) => {
     if (!canManageUsers) return;
 
@@ -332,6 +380,33 @@ const Settings = () => {
           <CardContent>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
               <div>
+                <Label className="text-muted-foreground">Foto de perfil</Label>
+                <div className="mt-2 flex items-center gap-3">
+                  {user?.picture ? (
+                    <img
+                      src={user.picture}
+                      alt={user?.name || "Perfil"}
+                      className="h-14 w-14 rounded-full border border-border object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border bg-muted text-sm font-semibold text-muted-foreground">
+                      {(user?.name || "U")
+                        .split(" ")
+                        .map((part) => part[0])
+                        .join("")
+                        .toUpperCase()
+                        .slice(0, 2)}
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <Input type="file" accept="image/*" onChange={handleProfilePictureUpload} disabled={uploadingProfilePicture} />
+                    <p className="text-xs text-muted-foreground">
+                      Sube una imagen JPG, PNG, WEBP, GIF o SVG de hasta 5 MB.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div>
                 <Label className="text-muted-foreground">Nombre</Label>
                 <p className="font-medium">{user?.name}</p>
               </div>
@@ -412,6 +487,12 @@ const Settings = () => {
                             </p>
                           </div>
                         ) : null}
+                        <div className="space-y-2">
+                          <Input type="file" accept="image/*" onChange={handleCompanyLogoUpload} disabled={!canEditCompany || uploadingCompanyLogo} />
+                          <p className="text-xs text-muted-foreground">
+                            Tambien puedes subir el logo directamente desde aqui.
+                          </p>
+                        </div>
                       </div>
                     </Field>
                     <div className="space-y-3 rounded-lg border border-border p-4 md:col-span-2">

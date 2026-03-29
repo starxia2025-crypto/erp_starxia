@@ -32,7 +32,7 @@ const Layout = ({ children, title }) => {
       <div className="flex min-h-screen flex-1 flex-col">
         <Header title={title} onMenuClick={() => setSidebarOpen(!sidebarOpen)} />
         {pendingLegalDocuments.length > 0 && (
-          <div className="border-b border-amber-500/20 bg-amber-500/10 px-6 py-3 text-sm text-amber-200">
+          <div className="border-b border-amber-300 bg-amber-50 px-6 py-3 text-sm font-medium text-amber-950">
             Tienes documentos legales pendientes de reaceptacion. Revisalos en Configuracion &gt; Legal.
           </div>
         )}

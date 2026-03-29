@@ -19,6 +19,7 @@ from compliance_services import build_verifactu_export, get_aeat_adapter
 from dotenv import load_dotenv
 from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from openai import AsyncOpenAI
 from passlib.context import CryptContext
@@ -31,6 +32,12 @@ from starlette.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
+MEDIA_DIR = ROOT_DIR / "media"
+COMPANY_LOGOS_DIR = MEDIA_DIR / "company_logos"
+USER_PICTURES_DIR = MEDIA_DIR / "user_pictures"
+MEDIA_DIR.mkdir(exist_ok=True)
+COMPANY_LOGOS_DIR.mkdir(exist_ok=True)
+USER_PICTURES_DIR.mkdir(exist_ok=True)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 JWT_SECRET = os.environ["JWT_SECRET"]
@@ -481,6 +488,7 @@ class UpdateUserInput(BaseModel):
 
 
 app = FastAPI(title="Starxia ERP API")
+app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
 
 ROLE_PERMISSIONS = {
     "owner": {"*"},
@@ -806,6 +814,34 @@ def model_to_dict(instance: Any, exclude: Optional[set[str]] = None) -> Dict[str
     return data
 
 
+def build_public_url(request: Request, path: Optional[str]) -> Optional[str]:
+    if not path:
+        return path
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    return str(request.base_url).rstrip("/") + path
+
+
+async def save_image_upload(file: UploadFile, target_dir: Path, prefix: str) -> str:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No se ha recibido ningun archivo")
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="El archivo debe ser una imagen")
+
+    extension = Path(file.filename).suffix.lower()
+    if extension not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}:
+        raise HTTPException(status_code=400, detail="Formato de imagen no permitido")
+
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="La imagen no puede superar 5 MB")
+
+    filename = f"{prefix}_{uuid.uuid4().hex}{extension}"
+    output_path = target_dir / filename
+    output_path.write_bytes(content)
+    return f"/media/{target_dir.name}/{filename}"
+
+
 def permissions_for_role(role: str) -> set[str]:
     return ROLE_PERMISSIONS.get(role, set())
 
@@ -878,6 +914,13 @@ def serialize_user(user: UserModel) -> Dict[str, Any]:
         data["company_name"] = company.legal_name or company.name
         data["company_logo_url"] = company.logo_url
         data["company_legal_name"] = company.legal_name
+    return data
+
+
+def serialize_user_for_request(user: UserModel, request: Request) -> Dict[str, Any]:
+    data = serialize_user(user)
+    data["picture"] = build_public_url(request, data.get("picture"))
+    data["company_logo_url"] = build_public_url(request, data.get("company_logo_url"))
     return data
 
 
@@ -2552,11 +2595,11 @@ def login(data: LoginInput, response: Response, db: Session = Depends(get_public
 
 
 @app.get("/api/auth/me")
-def get_me(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+def get_me(request: Request, user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, Any]:
     company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
     if company:
         setattr(user, "company", company)
-    data = serialize_user(user)
+    data = serialize_user_for_request(user, request)
     data["pending_legal_documents"] = get_required_legal_reacceptances(db, user)
     return data
 
@@ -2596,12 +2639,13 @@ def reset_password(data: ResetPasswordInput, db: Session = Depends(get_public_db
 
 
 @app.get("/api/companies")
-def get_companies(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+def get_companies(request: Request, user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
     require_permission(user, "settings.read")
     companies = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).all()
     payload = []
     for company in companies:
         data = model_to_dict(company)
+        data["logo_url"] = build_public_url(request, data.get("logo_url"))
         data["pending_legal_documents"] = get_required_legal_reacceptances(db, user)
         payload.append(data)
     return payload
@@ -2645,6 +2689,35 @@ def update_company(
     db.commit()
     db.refresh(company)
     return model_to_dict(company)
+
+
+@app.post("/api/companies/{company_id}/logo")
+async def upload_company_logo(
+    company_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_public_db),
+) -> Dict[str, Any]:
+    require_permission(user, "settings.write")
+    ensure_company_scope(user, company_id)
+    company = first_or_404(db.query(CompanyModel).filter(CompanyModel.company_id == company_id), "Company not found")
+    stored_path = await save_image_upload(file, COMPANY_LOGOS_DIR, f"company_{company.company_id}")
+    company.logo_url = stored_path
+    log_security_event(
+        db,
+        action="company.logo_uploaded",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="company",
+        entity_id=company.company_id,
+        metadata_json={"logo_url": stored_path},
+    )
+    db.commit()
+    db.refresh(company)
+    data = model_to_dict(company)
+    data["logo_url"] = build_public_url(request, data.get("logo_url"))
+    return data
 
 
 @app.get("/api/users")
@@ -2697,6 +2770,32 @@ def update_user(user_id: str, data: UpdateUserInput, user: UserModel = Depends(g
     db.commit()
     db.refresh(target_user)
     return serialize_user(target_user)
+
+
+@app.post("/api/users/me/picture")
+async def upload_my_picture(
+    request: Request,
+    file: UploadFile = File(...),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_public_db),
+) -> Dict[str, Any]:
+    stored_path = await save_image_upload(file, USER_PICTURES_DIR, f"user_{user.user_id}")
+    user.picture = stored_path
+    company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    if company:
+        setattr(user, "company", company)
+    log_security_event(
+        db,
+        action="user.picture_uploaded",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="user",
+        entity_id=user.user_id,
+        metadata_json={"picture": stored_path},
+    )
+    db.commit()
+    db.refresh(user)
+    return serialize_user_for_request(user, request)
 
 
 def scoped_list(model, user: UserModel, db: Session) -> List[Dict[str, Any]]:

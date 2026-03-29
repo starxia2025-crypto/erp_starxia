@@ -57,7 +57,7 @@ const Sidebar = ({ currentPath }) => {
           )}
           <div className="min-w-0">
             <span className="block truncate font-semibold text-lg">{companyName}</span>
-            <span className="block truncate text-xs text-muted-foreground">ERP multiempresa</span>
+            <span className="block truncate text-xs text-muted-foreground">ERP Starxia</span>
           </div>
         </Link>
       </div>
