@@ -769,8 +769,8 @@ def apply_tenant_migrations(schema_name: str) -> None:
         f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS currency VARCHAR(8) NOT NULL DEFAULT 'EUR'",
         f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS pdf_path TEXT",
         f"ALTER TABLE {schema}.invoices ADD COLUMN IF NOT EXISTS immutable_at TIMESTAMPTZ",
-        """
-        CREATE TABLE IF NOT EXISTS "{schema_name}".invoice_records (
+        f"""
+        CREATE TABLE IF NOT EXISTS {schema}.invoice_records (
             record_id VARCHAR(32) PRIMARY KEY,
             invoice_id VARCHAR(32) NOT NULL,
             company_id VARCHAR(32) NOT NULL,
@@ -787,15 +787,15 @@ def apply_tenant_migrations(schema_name: str) -> None:
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """,
-        """
-        CREATE TABLE IF NOT EXISTS "{schema_name}".system_events (
+        f"""
+        CREATE TABLE IF NOT EXISTS {schema}.system_events (
             event_id VARCHAR(32) PRIMARY KEY,
             company_id VARCHAR(32) NOT NULL,
             user_id VARCHAR(32) NOT NULL,
             event_type VARCHAR(128) NOT NULL,
             entity_type VARCHAR(64) NOT NULL,
             entity_id VARCHAR(32) NOT NULL,
-            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+            payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
             hash_current VARCHAR(128) NOT NULL,
             hash_previous VARCHAR(128),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1919,6 +1919,7 @@ def startup() -> None:
         seed_legal_documents(db)
         companies = db.query(CompanyModel).all()
         for company in companies:
+            ensure_schema_exists(company.schema_name)
             apply_tenant_migrations(company.schema_name)
             tenant_bind = get_tenant_bind(company.schema_name)
             TenantBase.metadata.create_all(bind=tenant_bind)
@@ -1931,6 +1932,7 @@ def health() -> Dict[str, str]:
 
 @app.get("/api/public/legal-documents")
 def get_public_legal_documents(db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
+    seed_legal_documents(db)
     return [
         model_to_dict(document)
         for document in get_active_legal_documents(db)
@@ -2142,6 +2144,7 @@ def register(data: RegisterInput, request: Request, response: Response, db: Sess
     if not data.accept_terms or not data.accept_privacy:
         raise HTTPException(status_code=400, detail="Debes aceptar terminos y politica de privacidad")
 
+    seed_legal_documents(db)
     schema_name = slugify_schema_name(data.company_name)
     ensure_schema_exists(schema_name)
 
@@ -2169,23 +2172,31 @@ def register(data: RegisterInput, request: Request, response: Response, db: Sess
         role="admin",
         company_id=company.company_id,
     )
-    db.add(company)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    setattr(user, "company_schema", schema_name)
-    record_legal_acceptance(db, user.user_id, company.company_id, terms_document.code, terms_document.version, request)
-    record_legal_acceptance(db, user.user_id, company.company_id, privacy_document.code, privacy_document.version, request)
-    log_security_event(
-        db,
-        action="auth.register",
-        company_id=company.company_id,
-        user_id=user.user_id,
-        entity_type="company",
-        entity_id=company.company_id,
-        metadata_json={"schema_name": schema_name},
-    )
-    db.commit()
+    try:
+        db.add(company)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        setattr(user, "company_schema", schema_name)
+        record_legal_acceptance(db, user.user_id, company.company_id, terms_document.code, terms_document.version, request)
+        record_legal_acceptance(db, user.user_id, company.company_id, privacy_document.code, privacy_document.version, request)
+        log_security_event(
+            db,
+            action="auth.register",
+            company_id=company.company_id,
+            user_id=user.user_id,
+            entity_type="company",
+            entity_id=company.company_id,
+            metadata_json={"schema_name": schema_name},
+        )
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Registration failed for company bootstrap")
+        raise HTTPException(status_code=400, detail="No se pudo crear la empresa. Revisa si el email ya existe o si faltan datos obligatorios.") from exc
 
     tenant_db = TenantSessionLocal(bind=get_tenant_bind(schema_name))
     try:
@@ -2205,6 +2216,13 @@ def register(data: RegisterInput, request: Request, response: Response, db: Sess
             payload={"name": warehouse.name},
         )
         tenant_db.commit()
+    except HTTPException:
+        tenant_db.rollback()
+        raise
+    except Exception as exc:
+        tenant_db.rollback()
+        logger.exception("Tenant bootstrap failed")
+        raise HTTPException(status_code=400, detail="La empresa se creo parcialmente, pero fallo la preparacion inicial del tenant.") from exc
     finally:
         tenant_db.close()
 

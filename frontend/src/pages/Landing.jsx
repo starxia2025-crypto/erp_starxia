@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import { Bot, Building2, FileText, Package, Shield, Users, BarChart3, KeyRound } from "lucide-react";
 
@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { API_BASE } from "@/lib/api";
 import LegalFooter from "@/components/layout/LegalFooter";
+import LegalDocumentLink from "@/components/legal/LegalDocumentLink";
 
 const API = API_BASE;
 
@@ -425,9 +426,7 @@ const Landing = () => {
                           />
                           <span>
                             Acepto los{" "}
-                            <Link to="/legal/terms" className="text-primary underline">
-                              terminos y condiciones
-                            </Link>{" "}
+                            <LegalDocumentLink code="terms" label="terminos y condiciones" className="inline text-primary underline" />{" "}
                             vigentes {versionFor("terms", legalDocuments)}.
                           </span>
                         </label>
@@ -440,9 +439,7 @@ const Landing = () => {
                           />
                           <span>
                             Acepto la{" "}
-                            <Link to="/legal/privacy" className="text-primary underline">
-                              politica de privacidad
-                            </Link>{" "}
+                            <LegalDocumentLink code="privacy" label="politica de privacidad" className="inline text-primary underline" />{" "}
                             vigente {versionFor("privacy", legalDocuments)}.
                           </span>
                         </label>

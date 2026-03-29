@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import LegalDocumentLink from "@/components/legal/LegalDocumentLink";
 
 const LegalFooter = () => {
   return (
@@ -6,10 +6,10 @@ const LegalFooter = () => {
       <div className="mx-auto flex max-w-7xl flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <p>Starxia ERP. SaaS de gestion empresarial.</p>
         <div className="flex flex-wrap gap-4">
-          <Link to="/legal/terms" className="hover:text-foreground">Terminos</Link>
-          <Link to="/legal/privacy" className="hover:text-foreground">Privacidad</Link>
-          <Link to="/legal/cookies" className="hover:text-foreground">Cookies</Link>
-          <Link to="/legal/dpa" className="hover:text-foreground">Encargado del tratamiento</Link>
+          <LegalDocumentLink code="terms" label="Terminos" className="hover:text-foreground" />
+          <LegalDocumentLink code="privacy" label="Privacidad" className="hover:text-foreground" />
+          <LegalDocumentLink code="cookies" label="Cookies" className="hover:text-foreground" />
+          <LegalDocumentLink code="dpa" label="Encargado del tratamiento" className="hover:text-foreground" />
           <a href="mailto:legal@starxia.com" className="hover:text-foreground">Contacto legal</a>
         </div>
       </div>
