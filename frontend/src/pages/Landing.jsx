@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
-import { Bot, Building2, FileText, Package, Shield, Users, BarChart3, KeyRound } from "lucide-react";
+import { Building2, KeyRound } from "lucide-react";
 
 import { useAuth } from "@/App";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { API_BASE } from "@/lib/api";
 import LegalFooter from "@/components/layout/LegalFooter";
 import LegalDocumentLink from "@/components/legal/LegalDocumentLink";
+import ServiceHeroCarousel from "@/components/marketing/ServiceHeroCarousel";
 
 const API = API_BASE;
 
@@ -32,39 +33,6 @@ const initialResetPassword = { new_password: "", confirm_password: "" };
 const initialConsents = { terms: false, privacy: false };
 const authInputClassName =
   "border-white/15 bg-white/5 text-white placeholder:text-zinc-500 caret-white autofill:bg-transparent";
-
-const features = [
-  {
-    icon: Users,
-    title: "Gestion de clientes",
-    description: "Segmenta, registra y consulta toda tu cartera sin salir del ERP.",
-  },
-  {
-    icon: Package,
-    title: "Inventario multi-almacen",
-    description: "Controla stock, minimos y entradas por almacen con importacion CSV.",
-  },
-  {
-    icon: FileText,
-    title: "Ventas y compras",
-    description: "Pedidos, facturas y compras en un flujo unico y ordenado.",
-  },
-  {
-    icon: BarChart3,
-    title: "Reportes exportables",
-    description: "Saca informes en Excel para operativa, ventas y compras.",
-  },
-  {
-    icon: Bot,
-    title: "Asistente IA",
-    description: "Consulta datos de negocio y recibe ayuda contextual dentro del sistema.",
-  },
-  {
-    icon: Shield,
-    title: "Acceso propio",
-    description: "Autenticacion interna lista para crecer contigo como SaaS.",
-  },
-];
 
 const Landing = () => {
   const { user, setUser } = useAuth();
@@ -191,24 +159,7 @@ const Landing = () => {
               <Building2 className="h-4 w-4" />
               ERP Starxia para operativa real
             </div>
-
-            <h1 className="mb-6 max-w-3xl text-4xl font-bold leading-tight text-white sm:text-5xl lg:text-6xl">
-              Gestiona ventas, compras e inventario desde un unico panel.
-            </h1>
-
-            <p className="mb-8 max-w-2xl text-lg text-zinc-300">
-              Esta base ya nace orientada a ERP: multiempresa, multiusuario, almacenes, documentos de venta y compra, reportes y asistente IA.
-            </p>
-
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {features.map((feature) => (
-                <div key={feature.title} className="rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-sm">
-                  <feature.icon className="mb-3 h-5 w-5 text-primary" />
-                  <h3 className="mb-1 font-semibold text-white">{feature.title}</h3>
-                  <p className="text-sm text-zinc-400">{feature.description}</p>
-                </div>
-              ))}
-            </div>
+            <ServiceHeroCarousel />
           </div>
 
           <Card className="border-white/10 bg-zinc-950/80 shadow-2xl shadow-black/30">
