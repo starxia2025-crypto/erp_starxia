@@ -112,6 +112,11 @@ const cropImageToSquareBlob = (imageSource, zoom = 1.2) =>
 const isAnimatedGifFile = (file) =>
   file && ((file.type || "").toLowerCase() === "image/gif" || file.name.toLowerCase().endsWith(".gif"));
 
+const getUploadErrorMessage = (error, fallback) =>
+  error?.response?.data?.detail ||
+  error?.message ||
+  fallback;
+
 const Settings = () => {
   const { user, setUser, checkAuth } = useAuth();
   const canEditCompany = hasPermission(user, "settings.write");
@@ -285,6 +290,10 @@ const Settings = () => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file || !company || !canEditCompany) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("La imagen no puede superar 5 MB");
+      return;
+    }
 
     const form = new FormData();
     form.append("file", file);
@@ -292,14 +301,18 @@ const Settings = () => {
     try {
       const response = await axios.post(`${API}/companies/${company.company_id}/logo`, form, {
         withCredentials: true,
-        headers: { "Content-Type": "multipart/form-data" },
       });
       setCompany(response.data);
       setFormData((current) => ({ ...current, logo_url: response.data.logo_url || "" }));
+      setUser((current) =>
+        current
+          ? { ...current, company_logo_url: response.data.logo_url || current.company_logo_url }
+          : current
+      );
       await checkAuth();
       toast.success("Logo de empresa actualizado");
     } catch (error) {
-      toast.error(error.response?.data?.detail || "No se pudo subir el logo");
+      toast.error(getUploadErrorMessage(error, "No se pudo subir el logo"));
     } finally {
       setUploadingCompanyLogo(false);
     }
@@ -309,6 +322,10 @@ const Settings = () => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("La imagen no puede superar 5 MB");
+      return;
+    }
 
     if (isAnimatedGifFile(file)) {
       const form = new FormData();
@@ -317,13 +334,12 @@ const Settings = () => {
       try {
         const response = await axios.post(`${API}/users/me/picture`, form, {
           withCredentials: true,
-          headers: { "Content-Type": "multipart/form-data" },
         });
         setUser((current) => (current ? { ...current, ...response.data } : response.data));
         await checkAuth();
         toast.success("GIF de perfil actualizado");
       } catch (error) {
-        toast.error(error.response?.data?.detail || "No se pudo subir la foto de perfil");
+        toast.error(getUploadErrorMessage(error, "No se pudo subir la foto de perfil"));
       } finally {
         setUploadingProfilePicture(false);
       }
@@ -350,7 +366,6 @@ const Settings = () => {
       form.append("file", new File([blob], "profile-photo.jpg", { type: "image/jpeg" }));
       const response = await axios.post(`${API}/users/me/picture`, form, {
         withCredentials: true,
-        headers: { "Content-Type": "multipart/form-data" },
       });
       setUser((current) => (current ? { ...current, ...response.data } : response.data));
       await checkAuth();
@@ -358,7 +373,7 @@ const Settings = () => {
       setProfileCropSource("");
       toast.success("Foto de perfil actualizada");
     } catch (error) {
-      toast.error(error.response?.data?.detail || "No se pudo subir la foto de perfil");
+      toast.error(getUploadErrorMessage(error, "No se pudo subir la foto de perfil"));
     } finally {
       setUploadingProfilePicture(false);
     }
