@@ -499,6 +499,7 @@ ROLE_PERMISSIONS = {
         "dashboard.read",
         "clients.read",
         "clients.write",
+        "products.read",
         "sales.read",
         "sales.write",
         "ai.read",
