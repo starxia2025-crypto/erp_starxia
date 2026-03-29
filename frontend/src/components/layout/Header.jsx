@@ -51,7 +51,7 @@ const Header = ({ title, onMenuClick }) => {
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" className="flex items-center gap-2 px-2" data-testid="user-menu">
               <Avatar className="h-8 w-8">
-                <AvatarImage src={user?.picture} alt={user?.name} />
+                <AvatarImage src={user?.picture} alt={user?.name} className="object-cover" />
                 <AvatarFallback className="bg-primary text-xs text-primary-foreground">
                   {getInitials(user?.name)}
                 </AvatarFallback>

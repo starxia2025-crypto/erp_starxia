@@ -10,8 +10,10 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -29,6 +31,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 const API = API_BASE;
 const ROLE_OPTIONS = [
@@ -48,8 +51,66 @@ const emptyEmployeeForm = {
   role: "sales",
 };
 
+const getInitials = (name) => {
+  if (!name) return "U";
+  return name
+    .split(" ")
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+};
+
+const readFileAsDataUrl = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+const cropImageToSquareBlob = (imageSource, zoom = 1.2) =>
+  new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const size = 512;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("No se pudo preparar el recorte"));
+        return;
+      }
+
+      const baseScale = Math.max(size / image.width, size / image.height);
+      const scale = baseScale * zoom;
+      const drawWidth = image.width * scale;
+      const drawHeight = image.height * scale;
+      const offsetX = (size - drawWidth) / 2;
+      const offsetY = (size - drawHeight) / 2;
+
+      context.clearRect(0, 0, size, size);
+      context.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error("No se pudo generar la imagen"));
+            return;
+          }
+          resolve(blob);
+        },
+        "image/jpeg",
+        0.92
+      );
+    };
+    image.onerror = reject;
+    image.src = imageSource;
+  });
+
 const Settings = () => {
-  const { user, checkAuth } = useAuth();
+  const { user, setUser, checkAuth } = useAuth();
   const canEditCompany = hasPermission(user, "settings.write");
   const canViewUsers = hasPermission(user, "users.read");
   const canManageUsers = hasPermission(user, "users.write");
@@ -66,6 +127,9 @@ const Settings = () => {
   const [updatingUserId, setUpdatingUserId] = useState(null);
   const [uploadingCompanyLogo, setUploadingCompanyLogo] = useState(false);
   const [uploadingProfilePicture, setUploadingProfilePicture] = useState(false);
+  const [profileCropOpen, setProfileCropOpen] = useState(false);
+  const [profileCropSource, setProfileCropSource] = useState("");
+  const [profileCropZoom, setProfileCropZoom] = useState([1.2]);
   const [formData, setFormData] = useState({
     name: "",
     legal_name: "",
@@ -240,16 +304,32 @@ const Settings = () => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      setProfileCropSource(dataUrl);
+      setProfileCropZoom([1.2]);
+      setProfileCropOpen(true);
+    } catch (error) {
+      toast.error("No se pudo leer la imagen seleccionada");
+    }
+  };
 
-    const form = new FormData();
-    form.append("file", file);
+  const handleConfirmProfileCrop = async () => {
+    if (!profileCropSource) return;
+
     setUploadingProfilePicture(true);
     try {
-      await axios.post(`${API}/users/me/picture`, form, {
+      const blob = await cropImageToSquareBlob(profileCropSource, profileCropZoom[0]);
+      const form = new FormData();
+      form.append("file", new File([blob], "profile-photo.jpg", { type: "image/jpeg" }));
+      const response = await axios.post(`${API}/users/me/picture`, form, {
         withCredentials: true,
         headers: { "Content-Type": "multipart/form-data" },
       });
+      setUser((current) => (current ? { ...current, ...response.data } : response.data));
       await checkAuth();
+      setProfileCropOpen(false);
+      setProfileCropSource("");
       toast.success("Foto de perfil actualizada");
     } catch (error) {
       toast.error(error.response?.data?.detail || "No se pudo subir la foto de perfil");
@@ -370,6 +450,40 @@ const Settings = () => {
   return (
     <Layout title="Configuracion">
       <div className="max-w-6xl space-y-6" data-testid="settings-page">
+        <Dialog open={profileCropOpen} onOpenChange={setProfileCropOpen}>
+          <DialogContent className="sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Ajustar foto de perfil</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-5">
+              <div className="flex justify-center">
+                <div className="relative h-64 w-64 overflow-hidden rounded-full border border-border bg-muted">
+                  {profileCropSource ? (
+                    <img
+                      src={profileCropSource}
+                      alt="Previsualizacion de perfil"
+                      className="h-full w-full object-cover"
+                      style={{ transform: `scale(${profileCropZoom[0]})` }}
+                    />
+                  ) : null}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Zoom</Label>
+                <Slider value={profileCropZoom} min={1} max={2.5} step={0.05} onValueChange={setProfileCropZoom} />
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setProfileCropOpen(false)} disabled={uploadingProfilePicture}>
+                  Cancelar
+                </Button>
+                <Button onClick={handleConfirmProfileCrop} disabled={uploadingProfilePicture}>
+                  {uploadingProfilePicture ? "Subiendo..." : "Guardar foto"}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -382,26 +496,16 @@ const Settings = () => {
               <div>
                 <Label className="text-muted-foreground">Foto de perfil</Label>
                 <div className="mt-2 flex items-center gap-3">
-                  {user?.picture ? (
-                    <img
-                      src={user.picture}
-                      alt={user?.name || "Perfil"}
-                      className="h-14 w-14 rounded-full border border-border object-cover"
-                    />
-                  ) : (
-                    <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border bg-muted text-sm font-semibold text-muted-foreground">
-                      {(user?.name || "U")
-                        .split(" ")
-                        .map((part) => part[0])
-                        .join("")
-                        .toUpperCase()
-                        .slice(0, 2)}
-                    </div>
-                  )}
+                  <Avatar className="h-20 w-20 border border-border">
+                    <AvatarImage src={user?.picture} alt={user?.name} className="object-cover" />
+                    <AvatarFallback className="bg-muted text-lg font-semibold text-muted-foreground">
+                      {getInitials(user?.name)}
+                    </AvatarFallback>
+                  </Avatar>
                   <div className="space-y-2">
                     <Input type="file" accept="image/*" onChange={handleProfilePictureUpload} disabled={uploadingProfilePicture} />
                     <p className="text-xs text-muted-foreground">
-                      Sube una imagen JPG, PNG, WEBP, GIF o SVG de hasta 5 MB.
+                      Sube una imagen JPG, PNG, WEBP, GIF o SVG de hasta 5 MB. Podras ajustarla antes de guardarla.
                     </p>
                   </div>
                 </div>

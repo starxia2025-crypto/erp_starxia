@@ -825,12 +825,12 @@ def build_public_url(request: Request, path: Optional[str]) -> Optional[str]:
 async def save_image_upload(file: UploadFile, target_dir: Path, prefix: str) -> str:
     if not file.filename:
         raise HTTPException(status_code=400, detail="No se ha recibido ningun archivo")
-    if not (file.content_type or "").startswith("image/"):
-        raise HTTPException(status_code=400, detail="El archivo debe ser una imagen")
-
     extension = Path(file.filename).suffix.lower()
     if extension not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}:
         raise HTTPException(status_code=400, detail="Formato de imagen no permitido")
+    content_type = (file.content_type or "").lower()
+    if content_type and content_type not in {"application/octet-stream"} and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="El archivo debe ser una imagen")
 
     content = await file.read()
     if len(content) > 5 * 1024 * 1024:
