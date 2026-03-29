@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -58,6 +59,7 @@ const Settings = () => {
   const [legalDocuments, setLegalDocuments] = useState([]);
   const [legalAcceptances, setLegalAcceptances] = useState([]);
   const [processingActivities, setProcessingActivities] = useState([]);
+  const [savingLegalDocument, setSavingLegalDocument] = useState(false);
   const [loading, setLoading] = useState(true);
   const [savingCompany, setSavingCompany] = useState(false);
   const [savingEmployee, setSavingEmployee] = useState(false);
@@ -82,6 +84,13 @@ const Settings = () => {
     legal_basis: "",
     retention_period: "",
     security_measures: "",
+  });
+  const [legalEditor, setLegalEditor] = useState({
+    code: "terms",
+    version: "",
+    title: "",
+    content: "",
+    requires_acceptance: true,
   });
 
   const roleLabelByValue = useMemo(
@@ -145,9 +154,25 @@ const Settings = () => {
     [company]
   );
 
+  const selectedLegalDocument = useMemo(
+    () => legalDocuments.find((document) => document.code === legalEditor.code) || null,
+    [legalDocuments, legalEditor.code]
+  );
+
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
+
+  useEffect(() => {
+    if (!selectedLegalDocument) return;
+    setLegalEditor({
+      code: selectedLegalDocument.code,
+      version: selectedLegalDocument.version,
+      title: selectedLegalDocument.title,
+      content: selectedLegalDocument.content,
+      requires_acceptance: Boolean(selectedLegalDocument.requires_acceptance),
+    });
+  }, [selectedLegalDocument]);
 
   const handleCompanySubmit = async (event) => {
     event.preventDefault();
@@ -257,6 +282,22 @@ const Settings = () => {
       toast.success(response.data.message || "Solicitud registrada");
     } catch (error) {
       toast.error(error.response?.data?.detail || "No se pudo completar la solicitud");
+    }
+  };
+
+  const handleLegalDocumentPublish = async (event) => {
+    event.preventDefault();
+    if (!canEditCompany) return;
+
+    setSavingLegalDocument(true);
+    try {
+      await axios.post(`${API}/legal-documents/publish`, legalEditor, { withCredentials: true });
+      toast.success("Documento legal publicado");
+      await loadSettings();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo publicar el documento");
+    } finally {
+      setSavingLegalDocument(false);
     }
   };
 
@@ -397,6 +438,73 @@ const Settings = () => {
                       ))}
                     </div>
                   </div>
+
+                  {canEditCompany && (
+                    <div className="rounded-lg border border-border p-4">
+                      <div className="mb-3 text-sm font-medium">Editor de documentos legales</div>
+                      <form className="space-y-4" onSubmit={handleLegalDocumentPublish}>
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                          <Field label="Documento">
+                            <Select
+                              value={legalEditor.code}
+                              onValueChange={(value) =>
+                                setLegalEditor((current) => ({
+                                  ...current,
+                                  code: value,
+                                }))
+                              }
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="terms">Terminos</SelectItem>
+                                <SelectItem value="privacy">Privacidad</SelectItem>
+                                <SelectItem value="dpa">Encargado del tratamiento</SelectItem>
+                                <SelectItem value="cookies">Cookies</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </Field>
+                          <Field label="Version">
+                            <Input
+                              value={legalEditor.version}
+                              onChange={(event) => setLegalEditor({ ...legalEditor, version: event.target.value })}
+                            />
+                          </Field>
+                          <Field label="Requiere aceptacion">
+                            <label className="flex h-10 items-center gap-3 rounded-md border border-input px-3 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={legalEditor.requires_acceptance}
+                                onChange={(event) =>
+                                  setLegalEditor({ ...legalEditor, requires_acceptance: event.target.checked })
+                                }
+                              />
+                              Si
+                            </label>
+                          </Field>
+                        </div>
+                        <Field label="Titulo">
+                          <Input
+                            value={legalEditor.title}
+                            onChange={(event) => setLegalEditor({ ...legalEditor, title: event.target.value })}
+                          />
+                        </Field>
+                        <Field label="Contenido">
+                          <Textarea
+                            className="min-h-[280px]"
+                            value={legalEditor.content}
+                            onChange={(event) => setLegalEditor({ ...legalEditor, content: event.target.value })}
+                          />
+                        </Field>
+                        <div className="flex justify-end">
+                          <Button type="submit" disabled={savingLegalDocument}>
+                            {savingLegalDocument ? "Publicando..." : "Publicar nueva version"}
+                          </Button>
+                        </div>
+                      </form>
+                    </div>
+                  )}
 
                   <div className="rounded-lg border border-border p-4">
                     <div className="mb-3 text-sm font-medium">Historial de aceptaciones</div>

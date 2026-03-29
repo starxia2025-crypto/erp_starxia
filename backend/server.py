@@ -430,6 +430,14 @@ class LegalAcceptanceInput(BaseModel):
     accepted: bool = True
 
 
+class LegalDocumentPublishInput(BaseModel):
+    code: str
+    version: str
+    title: str
+    content: str
+    requires_acceptance: bool = True
+
+
 class LoginInput(BaseModel):
     email: EmailStr
     password: str
@@ -537,6 +545,229 @@ ENTITY_PERMISSION_MAP = {
     "product": "products",
     "warehouse": "inventory",
 }
+DEFAULT_LEGAL_DOCUMENTS = {
+    "terms": {
+        "version": "2026.04",
+        "title": "Terminos y condiciones",
+        "requires_acceptance": True,
+        "content": """1. Objeto del servicio
+
+Starxia ERP es un software SaaS de gestion empresarial accesible en linea para la administracion de clientes, proveedores, inventario, compras, ventas, facturacion y analitica de negocio.
+
+2. Partes
+
+El prestador del servicio es la entidad titular de Starxia ERP.
+El cliente es la empresa o profesional que contrata el servicio y crea una cuenta de empresa en la plataforma.
+
+3. Alta y acceso
+
+El cliente declara que los datos facilitados en el alta son exactos, completos y actualizados.
+La persona que acepta estas condiciones declara tener capacidad suficiente para contratar en nombre propio o de la empresa a la que representa.
+
+4. Uso permitido
+
+El cliente podra utilizar la plataforma exclusivamente para su actividad empresarial o profesional legitima y conforme a la ley.
+Queda prohibido:
+- utilizar el servicio para fines ilicitos
+- compartir credenciales de forma insegura
+- intentar acceder a datos de terceros
+- alterar, copiar o explotar la plataforma fuera de lo permitido contractualmente
+
+5. Roles y control de acceso
+
+Cada empresa es responsable de asignar usuarios, roles y permisos internos.
+El cliente asume la responsabilidad de custodiar sus credenciales y de revocar el acceso a usuarios que ya no deban operar en el sistema.
+
+6. Disponibilidad y soporte
+
+El servicio se presta bajo un modelo SaaS y se intentara mantener una disponibilidad razonable y continuada.
+Podran producirse interrupciones por mantenimiento, seguridad, incidencias de terceros o fuerza mayor.
+
+7. Facturacion y cumplimiento
+
+Starxia ERP incorpora funcionalidades orientadas al cumplimiento fiscal y de facturacion, pero el cliente sigue siendo responsable de la veracidad de los datos introducidos y de su correcto uso operativo.
+La configuracion fiscal definitiva debe validarse por el cliente y, en su caso, por su asesoria fiscal o juridica.
+
+8. Propiedad intelectual
+
+La plataforma, su codigo, estructura, diseno, marcas y documentacion son titularidad del prestador o de sus licenciantes.
+El cliente recibe un derecho limitado, no exclusivo y no sublicenciable de uso mientras el servicio este vigente.
+
+9. Proteccion de datos
+
+El tratamiento de datos personales se regula adicionalmente por la politica de privacidad y, cuando proceda, por el contrato de encargado del tratamiento.
+
+10. Responsabilidad
+
+El servicio se presta como herramienta de gestion.
+El prestador no responde de decisiones empresariales, contables, fiscales o comerciales tomadas por el cliente ni de errores derivados de datos incorrectos introducidos por este.
+
+11. Suspensiones y resolucion
+
+El prestador podra suspender el acceso por incumplimientos graves, riesgos de seguridad, uso fraudulento o impago, cuando exista base contractual para ello.
+
+12. Modificaciones
+
+Estas condiciones podran actualizarse por razones legales, tecnicas, operativas o comerciales.
+Cuando la version aplicable cambie y sea necesario, el sistema podra solicitar una nueva aceptacion.
+
+13. Ley aplicable y jurisdiccion
+
+Estas condiciones se interpretaran conforme al derecho espanol, sin perjuicio de la normativa imperativa aplicable.
+
+TODO JURIDICO:
+- completar identificacion del prestador
+- incluir condiciones economicas definitivas
+- revisar clausulas de limitacion de responsabilidad
+- validar jurisdiccion y foro""",
+    },
+    "privacy": {
+        "version": "2026.04",
+        "title": "Politica de privacidad",
+        "requires_acceptance": True,
+        "content": """1. Responsable del tratamiento
+
+El responsable del tratamiento sera la entidad titular de Starxia ERP, cuyos datos identificativos completos deben incorporarse antes de produccion.
+
+2. Finalidades
+
+Los datos personales podran tratarse para:
+- gestion del alta y autenticacion de usuarios
+- prestacion del servicio ERP
+- soporte tecnico y atencion al cliente
+- seguridad, auditoria y prevencion de fraude
+- cumplimiento legal y fiscal
+- comunicaciones vinculadas al servicio
+
+3. Base juridica
+
+Las bases juridicas podran ser:
+- ejecucion de la relacion contractual
+- cumplimiento de obligaciones legales
+- interes legitimo en seguridad, continuidad y soporte
+- consentimiento, cuando proceda
+
+4. Categorias de datos
+
+Podran tratarse, segun el uso del servicio:
+- datos identificativos y de contacto
+- datos profesionales y de empresa
+- datos de acceso, logs y evidencias tecnicas
+- datos de clientes, proveedores y operaciones del cliente alojados en la plataforma
+
+5. Conservacion
+
+Los datos se conservaran durante la vigencia de la relacion y posteriormente durante los plazos legales o mientras existan responsabilidades asociadas.
+
+6. Destinatarios
+
+Podran acceder a los datos:
+- personal autorizado del prestador
+- proveedores tecnologicos necesarios para operar el servicio
+- encargados del tratamiento formalizados
+- autoridades cuando exista obligacion legal
+
+7. Transferencias internacionales
+
+Solo se realizaran cuando exista una base legal suficiente y garantias adecuadas conforme al RGPD.
+
+8. Derechos
+
+Las personas interesadas podran ejercitar sus derechos de acceso, rectificacion, supresion, oposicion, limitacion y portabilidad cuando proceda.
+El sistema incorpora un flujo basico para registrar solicitudes, sin perjuicio del procedimiento juridico definitivo del responsable.
+
+9. Seguridad
+
+Se aplican medidas tecnicas y organizativas razonables para proteger los datos, incluyendo control de acceso, segregacion por empresa, auditoria y gestion de credenciales.
+
+10. Encargado del tratamiento
+
+Cuando el cliente use Starxia ERP para tratar datos personales por cuenta propia, podra resultar aplicable el contrato de encargado del tratamiento.
+
+11. Reclamaciones
+
+La persona interesada podra reclamar ante la autoridad de control competente si considera vulnerados sus derechos.
+
+TODO JURIDICO:
+- completar datos del responsable
+- concretar plazos de conservacion
+- revisar lista de proveedores y transferencias
+- validar redaccion final con DPO o asesoria""",
+    },
+    "dpa": {
+        "version": "2026.04",
+        "title": "Contrato de encargado del tratamiento",
+        "requires_acceptance": True,
+        "content": """1. Objeto
+
+El presente acuerdo regula el tratamiento de datos personales realizado por el prestador de Starxia ERP por cuenta del cliente, cuando este utilice la plataforma para gestionar datos personales bajo su propia responsabilidad.
+
+2. Naturaleza y finalidad
+
+El tratamiento se limita a la prestacion del servicio SaaS de gestion empresarial y a las operaciones tecnicamente necesarias para su mantenimiento, soporte, seguridad y continuidad.
+
+3. Tipo de datos y categorias
+
+Dependiendo del uso del cliente, podran incluirse datos identificativos, de contacto, facturacion, operaciones comerciales y otra informacion incorporada por el propio cliente a la plataforma.
+
+4. Obligaciones del encargado
+
+El encargado se compromete a:
+- tratar los datos solo siguiendo instrucciones documentadas del responsable
+- garantizar confidencialidad del personal autorizado
+- aplicar medidas de seguridad adecuadas
+- asistir al responsable en el ejercicio de derechos
+- apoyar en seguridad, brechas y evaluaciones cuando proceda
+- suprimir o devolver los datos al finalizar la relacion, salvo obligacion legal de conservacion
+
+5. Subencargados
+
+El encargado podra apoyarse en subencargados tecnicos necesarios para la prestacion del servicio, siempre con las garantias contractuales correspondientes.
+
+6. Brechas de seguridad
+
+El encargado notificara al responsable, sin dilacion indebida, aquellas incidencias de seguridad que puedan afectar a datos personales tratados por cuenta del cliente.
+
+7. Auditoria e informacion
+
+El encargado pondra a disposicion del responsable la informacion razonablemente necesaria para demostrar el cumplimiento de sus obligaciones contractuales.
+
+8. Duracion
+
+Este acuerdo permanecera vigente mientras el encargado trate datos personales por cuenta del responsable dentro del servicio.
+
+TODO JURIDICO:
+- completar identidad de las partes
+- detallar subencargados reales
+- revisar anexo tecnico de seguridad
+- validar texto definitivo conforme al articulo 28 RGPD""",
+    },
+    "cookies": {
+        "version": "2026.04",
+        "title": "Politica de cookies",
+        "requires_acceptance": False,
+        "content": """1. Uso de cookies
+
+La aplicacion puede utilizar cookies tecnicas necesarias para permitir el acceso autenticado, mantener la sesion, reforzar seguridad y asegurar el funcionamiento basico del servicio.
+
+2. Tipologias
+
+En el estado actual del sistema se contemplan principalmente cookies tecnicas y de sesion.
+Si en el futuro se incorporan cookies analiticas, publicitarias o equivalentes, debera habilitarse un panel de consentimiento especifico.
+
+3. Gestion
+
+El usuario puede configurar su navegador para bloquear o eliminar cookies, aunque ello podria afectar al funcionamiento del servicio.
+
+4. Informacion adicional
+
+Para mas informacion sobre tratamiento de datos personales, consulta la politica de privacidad.
+
+TODO JURIDICO:
+- revisar inventario real de cookies
+- anadir CMP si se incorporan cookies no tecnicas""",
+    },
+}
 
 
 def get_public_db():
@@ -592,7 +823,12 @@ def get_active_legal_documents(db: Session, requires_acceptance: Optional[bool] 
     query = db.query(LegalDocumentModel).filter(LegalDocumentModel.is_active.is_(True))
     if requires_acceptance is not None:
         query = query.filter(LegalDocumentModel.requires_acceptance.is_(requires_acceptance))
-    return query.order_by(LegalDocumentModel.code.asc(), LegalDocumentModel.published_at.desc()).all()
+    items = query.order_by(LegalDocumentModel.code.asc(), LegalDocumentModel.published_at.desc()).all()
+    latest_by_code: Dict[str, LegalDocumentModel] = {}
+    for item in items:
+        if item.code not in latest_by_code:
+            latest_by_code[item.code] = item
+    return list(latest_by_code.values())
 
 
 def get_latest_legal_document_by_code(db: Session, code: str) -> LegalDocumentModel:
@@ -811,42 +1047,33 @@ def apply_tenant_migrations(schema_name: str) -> None:
 def seed_legal_documents(db: Session) -> None:
     seed_documents = [
         (
-            "terms",
-            "2026.03",
-            "Terminos y condiciones",
-            "Estos terminos regulan el acceso y uso del ERP como servicio SaaS. TODO: revisar clausulas finales con asesoria juridica.",
-            True,
-        ),
-        (
-            "privacy",
-            "2026.03",
-            "Politica de privacidad",
-            "Informacion basica y ampliada sobre el tratamiento de datos personales conforme al RGPD y la LOPDGDD. TODO: completar con datos del responsable y plazos exactos.",
-            True,
-        ),
-        (
-            "dpa",
-            "2026.03",
-            "Contrato de encargado del tratamiento",
-            "Acuerdo de encargo del tratamiento entre el cliente y el proveedor del SaaS. TODO: validar clausulas del articulo 28 RGPD con asesoria.",
-            True,
-        ),
-        (
-            "cookies",
-            "2026.03",
-            "Politica de cookies",
-            "Informacion sobre uso de cookies tecnicas y otras tecnologias similares. TODO: ajustar si se anaden cookies analiticas o publicitarias.",
-            False,
-        ),
+            code,
+            config["version"],
+            config["title"],
+            config["content"],
+            config["requires_acceptance"],
+        )
+        for code, config in DEFAULT_LEGAL_DOCUMENTS.items()
     ]
     changed = False
     for code, version, title, content, requires_acceptance in seed_documents:
+        previous_items = db.query(LegalDocumentModel).filter(LegalDocumentModel.code == code).all()
+        for previous in previous_items:
+            if previous.version != version and previous.is_active:
+                previous.is_active = False
+                changed = True
         existing = (
             db.query(LegalDocumentModel)
             .filter(LegalDocumentModel.code == code, LegalDocumentModel.version == version)
             .first()
         )
         if existing:
+            if existing.content != content or existing.title != title or existing.requires_acceptance != requires_acceptance:
+                existing.content = content
+                existing.title = title
+                existing.requires_acceptance = requires_acceptance
+                existing.is_active = True
+                changed = True
             continue
         db.add(
             LegalDocumentModel(
@@ -1944,6 +2171,66 @@ def get_public_legal_documents(db: Session = Depends(get_public_db)) -> List[Dic
 def get_legal_documents(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> List[Dict[str, Any]]:
     require_permission(user, "settings.read")
     return [model_to_dict(document) for document in get_active_legal_documents(db)]
+
+
+@app.post("/api/legal-documents/publish")
+def publish_legal_document(
+    data: LegalDocumentPublishInput,
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_public_db),
+) -> Dict[str, Any]:
+    require_permission(user, "settings.write")
+    code = data.code.strip().lower()
+    version = data.version.strip()
+    title = data.title.strip()
+    content = data.content.strip()
+    if not code or not version or not title or not content:
+        raise HTTPException(status_code=400, detail="Code, version, title and content are required")
+
+    existing_same_version = (
+        db.query(LegalDocumentModel)
+        .filter(LegalDocumentModel.code == code, LegalDocumentModel.version == version)
+        .first()
+    )
+    if existing_same_version:
+        existing_same_version.title = title
+        existing_same_version.content = content
+        existing_same_version.requires_acceptance = data.requires_acceptance
+        existing_same_version.is_active = True
+        item = existing_same_version
+    else:
+        item = LegalDocumentModel(
+            document_id=prefixed_id("ldoc"),
+            code=code,
+            version=version,
+            title=title,
+            content=content,
+            requires_acceptance=data.requires_acceptance,
+            is_active=True,
+            published_at=datetime.now(timezone.utc),
+        )
+        db.add(item)
+
+    older_versions = (
+        db.query(LegalDocumentModel)
+        .filter(LegalDocumentModel.code == code, LegalDocumentModel.document_id != item.document_id)
+        .all()
+    )
+    for older in older_versions:
+        older.is_active = False
+
+    log_security_event(
+        db,
+        action="legal_document.published",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="legal_document",
+        entity_id=code,
+        metadata_json={"version": version},
+    )
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
 
 
 @app.get("/api/legal-acceptances")
