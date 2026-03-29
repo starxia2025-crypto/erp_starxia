@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { Building2, FileText, Mail, Shield, User, Users } from "lucide-react";
 
@@ -159,6 +159,8 @@ const Settings = () => {
     content: "",
     requires_acceptance: true,
   });
+  const companyLogoInputRef = useRef(null);
+  const profilePictureInputRef = useRef(null);
 
   const roleLabelByValue = useMemo(
     () => Object.fromEntries(ROLE_OPTIONS.map((item) => [item.value, item.label])),
@@ -492,33 +494,49 @@ const Settings = () => {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div>
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-4">
+              <div className="space-y-3">
                 <Label className="text-muted-foreground">Foto de perfil</Label>
-                <div className="mt-2 flex items-center gap-3">
+                <div className="flex flex-col items-start gap-4">
                   <Avatar className="h-20 w-20 border border-border">
                     <AvatarImage src={user?.picture} alt={user?.name} className="object-cover" />
                     <AvatarFallback className="bg-muted text-lg font-semibold text-muted-foreground">
                       {getInitials(user?.name)}
                     </AvatarFallback>
                   </Avatar>
+                  <input
+                    ref={profilePictureInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleProfilePictureUpload}
+                    disabled={uploadingProfilePicture}
+                    className="hidden"
+                  />
                   <div className="space-y-2">
-                    <Input type="file" accept="image/*" onChange={handleProfilePictureUpload} disabled={uploadingProfilePicture} />
-                    <p className="text-xs text-muted-foreground">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="cursor-pointer shadow-sm transition-shadow hover:shadow-md"
+                      onClick={() => profilePictureInputRef.current?.click()}
+                      disabled={uploadingProfilePicture}
+                    >
+                      {uploadingProfilePicture ? "Subiendo..." : "Seleccionar archivo"}
+                    </Button>
+                    <p className="max-w-xs text-xs leading-5 text-muted-foreground">
                       Sube una imagen JPG, PNG, WEBP, GIF o SVG de hasta 5 MB. Podras ajustarla antes de guardarla.
                     </p>
                   </div>
                 </div>
               </div>
-              <div>
+              <div className="space-y-1">
                 <Label className="text-muted-foreground">Nombre</Label>
                 <p className="font-medium">{user?.name}</p>
               </div>
-              <div>
+              <div className="space-y-1">
                 <Label className="text-muted-foreground">Email</Label>
                 <p className="font-medium">{user?.email}</p>
               </div>
-              <div>
+              <div className="space-y-1">
                 <Label className="text-muted-foreground">Rol</Label>
                 <div className="mt-1">
                   <Badge variant={getRoleBadgeVariant(user?.role)}>{roleLabelByValue[user?.role] || user?.role}</Badge>
@@ -592,7 +610,23 @@ const Settings = () => {
                           </div>
                         ) : null}
                         <div className="space-y-2">
-                          <Input type="file" accept="image/*" onChange={handleCompanyLogoUpload} disabled={!canEditCompany || uploadingCompanyLogo} />
+                          <input
+                            ref={companyLogoInputRef}
+                            type="file"
+                            accept="image/*"
+                            onChange={handleCompanyLogoUpload}
+                            disabled={!canEditCompany || uploadingCompanyLogo}
+                            className="hidden"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="cursor-pointer shadow-sm transition-shadow hover:shadow-md"
+                            onClick={() => companyLogoInputRef.current?.click()}
+                            disabled={!canEditCompany || uploadingCompanyLogo}
+                          >
+                            {uploadingCompanyLogo ? "Subiendo..." : "Seleccionar archivo"}
+                          </Button>
                           <p className="text-xs text-muted-foreground">
                             Tambien puedes subir el logo directamente desde aqui.
                           </p>
