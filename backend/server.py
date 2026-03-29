@@ -15,12 +15,14 @@ from urllib.parse import urlencode
  
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from jose import JWTError, jwt
 from openai import AsyncOpenAI
 from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfgen import canvas
 from sqlalchemy import JSON, DateTime, Float, Integer, MetaData, String, Text, UniqueConstraint, create_engine, text
 from sqlalchemy.orm import Session, declarative_base, mapped_column, sessionmaker
 from starlette.middleware.cors import CORSMiddleware
@@ -257,6 +259,37 @@ class PurchaseInvoiceModel(TenantBase, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
+class ReturnModel(TenantBase, TimestampMixin):
+    __tablename__ = "returns"
+
+    return_id = mapped_column(String(32), primary_key=True)
+    return_number = mapped_column(String(64), nullable=False)
+    return_type = mapped_column(String(32), nullable=False)
+    source_document_id = mapped_column(String(32), nullable=False)
+    source_document_number = mapped_column(String(64), nullable=False)
+    partner_id = mapped_column(String(32), nullable=False)
+    partner_name = mapped_column(String(255), nullable=False)
+    warehouse_id = mapped_column(String(32), nullable=False)
+    items = mapped_column(JSON, default=list, nullable=False)
+    subtotal = mapped_column(Float, default=0.0, nullable=False)
+    tax = mapped_column(Float, default=0.0, nullable=False)
+    total = mapped_column(Float, default=0.0, nullable=False)
+    reason = mapped_column(Text)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
+class StockTransferModel(TenantBase, TimestampMixin):
+    __tablename__ = "stock_transfers"
+
+    transfer_id = mapped_column(String(32), primary_key=True)
+    transfer_number = mapped_column(String(64), nullable=False)
+    source_warehouse_id = mapped_column(String(32), nullable=False)
+    target_warehouse_id = mapped_column(String(32), nullable=False)
+    items = mapped_column(JSON, default=list, nullable=False)
+    notes = mapped_column(Text)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
 class ChatMessageModel(TenantBase, TimestampMixin):
     __tablename__ = "chat_messages"
 
@@ -290,6 +323,21 @@ class ForgotPasswordInput(BaseModel):
 class ResetPasswordInput(BaseModel):
     token: str
     new_password: str = Field(min_length=8)
+
+
+class ReturnInput(BaseModel):
+    return_type: str
+    source_document_id: str
+    warehouse_id: Optional[str] = None
+    reason: Optional[str] = None
+    items: List[Dict[str, Any]]
+
+
+class StockTransferInput(BaseModel):
+    source_warehouse_id: str
+    target_warehouse_id: str
+    notes: Optional[str] = None
+    items: List[Dict[str, Any]]
 
 
 class CreateUserInput(BaseModel):
@@ -484,7 +532,12 @@ def decode_password_reset_token(token: str) -> Dict[str, Any]:
     return payload
 
 
-def send_email_message(to_email: str, subject: str, body: str) -> None:
+def send_email_message(
+    to_email: str,
+    subject: str,
+    body: str,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     if not SMTP_HOST or not SMTP_FROM_EMAIL:
         raise RuntimeError("SMTP is not configured")
 
@@ -493,6 +546,13 @@ def send_email_message(to_email: str, subject: str, body: str) -> None:
     message["From"] = f"{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>"
     message["To"] = to_email
     message.set_content(body)
+    for attachment in attachments or []:
+        message.add_attachment(
+            attachment["content"],
+            maintype=attachment["maintype"],
+            subtype=attachment["subtype"],
+            filename=attachment["filename"],
+        )
 
     try:
         if SMTP_USE_SSL:
@@ -682,6 +742,218 @@ def enrich_invoice_like(item: Any) -> Dict[str, Any]:
     data = model_to_dict(item)
     data["outstanding_amount"] = 0 if data.get("status") == "paid" else float(data.get("total") or 0)
     return data
+
+
+def enrich_transfer(item: StockTransferModel) -> Dict[str, Any]:
+    data = model_to_dict(item)
+    data["items_count"] = sum(int(line.get("quantity", 0) or 0) for line in (item.items or []))
+    return data
+
+
+def get_invoice_inventory_warehouse_id(db: Session, user: UserModel, invoice: Any, invoice_kind: str) -> str:
+    if invoice_kind == "sales" and getattr(invoice, "order_id", None):
+        order = company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == invoice.order_id).first()
+        if order and order.warehouse_id:
+            return order.warehouse_id
+
+    if invoice_kind == "purchase" and getattr(invoice, "po_id", None):
+        purchase_order = company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).filter(
+            PurchaseOrderModel.po_id == invoice.po_id
+        ).first()
+        if purchase_order and purchase_order.warehouse_id:
+            return purchase_order.warehouse_id
+
+    return get_default_warehouse(user, db).warehouse_id
+
+
+def get_return_source_document(db: Session, user: UserModel, return_type: str, source_document_id: str):
+    if return_type == "sales":
+        invoice = first_or_404(
+            company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == source_document_id),
+            "Sales invoice not found",
+        )
+        warehouse_id = resolve_warehouse_id(user, db, None)
+        if invoice.order_id:
+            source_order = company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == invoice.order_id).first()
+            if source_order and source_order.warehouse_id:
+                warehouse_id = source_order.warehouse_id
+        return {
+            "source_model": invoice,
+            "warehouse_id": warehouse_id,
+            "partner_id": invoice.client_id,
+            "partner_name": invoice.client_name,
+            "items": invoice.items or [],
+            "number": invoice.invoice_number,
+        }
+
+    if return_type == "purchase":
+        purchase_invoice = first_or_404(
+            company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.pinv_id == source_document_id),
+            "Purchase invoice not found",
+        )
+        warehouse_id = resolve_warehouse_id(user, db, None)
+        if purchase_invoice.po_id:
+            source_po = company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).filter(PurchaseOrderModel.po_id == purchase_invoice.po_id).first()
+            if source_po and source_po.warehouse_id:
+                warehouse_id = source_po.warehouse_id
+        return {
+            "source_model": purchase_invoice,
+            "warehouse_id": warehouse_id,
+            "partner_id": purchase_invoice.supplier_id,
+            "partner_name": purchase_invoice.supplier_name,
+            "items": purchase_invoice.items or [],
+            "number": purchase_invoice.invoice_number,
+        }
+
+    raise HTTPException(status_code=400, detail="Invalid return type")
+
+
+def build_return_items(source_items: List[Dict[str, Any]], requested_items: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], float]:
+    if not requested_items:
+        raise HTTPException(status_code=400, detail="Return must include at least one item")
+
+    source_index = {item.get("product_id"): item for item in source_items}
+    built_items: List[Dict[str, Any]] = []
+    subtotal = 0.0
+
+    for line in requested_items:
+        product_id = line.get("product_id")
+        quantity = int(line.get("quantity", 0) or 0)
+        if not product_id or quantity <= 0:
+            continue
+        source_line = source_index.get(product_id)
+        if not source_line:
+            raise HTTPException(status_code=400, detail="One of the return items does not belong to the source document")
+        source_quantity = int(source_line.get("quantity", 0) or 0)
+        if quantity > source_quantity:
+            raise HTTPException(status_code=400, detail="Return quantity exceeds original document quantity")
+        price = float(source_line.get("price", 0) or 0)
+        total = quantity * price
+        built_items.append(
+            {
+                "product_id": product_id,
+                "product_name": source_line.get("product_name"),
+                "quantity": quantity,
+                "price": price,
+                "total": total,
+            }
+        )
+        subtotal += total
+
+    if not built_items:
+        raise HTTPException(status_code=400, detail="Return must include at least one valid item")
+    return built_items, subtotal
+
+
+def query_report_rows(
+    report_type: str,
+    user: UserModel,
+    db: Session,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    client_id: Optional[str] = None,
+    supplier_id: Optional[str] = None,
+    status: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    sort_direction: str = "desc",
+) -> List[Dict[str, Any]]:
+    if report_type == "inventory":
+        rows = [model_to_dict(item) for item in company_filter(db.query(InventoryModel), InventoryModel, user).all()]
+        if sort_by == "quantity":
+            rows.sort(key=lambda item: item.get("quantity", 0), reverse=sort_direction == "desc")
+        return rows
+
+    model_map = {
+        "clients": ClientModel,
+        "suppliers": SupplierModel,
+        "products": ProductModel,
+        "orders": OrderModel,
+        "invoices": InvoiceModel,
+        "purchase-orders": PurchaseOrderModel,
+        "purchase-invoices": PurchaseInvoiceModel,
+        "returns": ReturnModel,
+        "stock-transfers": StockTransferModel,
+    }
+    model = model_map.get(report_type)
+    if not model:
+        raise HTTPException(status_code=400, detail="Invalid report type")
+
+    query = company_filter(db.query(model), model, user)
+    date_from_value = parse_iso_datetime(date_from) if date_from else None
+    date_to_value = parse_iso_datetime(date_to) if date_to else None
+    if date_from_value:
+        query = query.filter(model.created_at >= date_from_value)
+    if date_to_value:
+        query = query.filter(model.created_at <= date_to_value + timedelta(days=1))
+
+    if client_id and hasattr(model, "client_id"):
+        query = query.filter(model.client_id == client_id)
+    if supplier_id and hasattr(model, "supplier_id"):
+        query = query.filter(model.supplier_id == supplier_id)
+    if status and hasattr(model, "status"):
+        query = query.filter(model.status == status)
+
+    if sort_by and hasattr(model, sort_by):
+        order_column = getattr(model, sort_by)
+        query = query.order_by(order_column.asc() if sort_direction == "asc" else order_column.desc())
+    elif hasattr(model, "created_at"):
+        query = query.order_by(model.created_at.desc())
+
+    items = query.all()
+    if model in {InvoiceModel, PurchaseInvoiceModel}:
+        return [enrich_invoice_like(item) for item in items]
+    if model is StockTransferModel:
+        return [enrich_transfer(item) for item in items]
+    return [model_to_dict(item) for item in items]
+
+
+def dataframe_for_report(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    normalized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        normalized = {}
+        for key, value in row.items():
+            if isinstance(value, (list, dict)):
+                normalized[key] = json.dumps(value, ensure_ascii=False)
+            else:
+                normalized[key] = value
+        normalized_rows.append(normalized)
+    return pd.DataFrame(normalized_rows)
+
+
+def build_pdf_report(title: str, rows: List[Dict[str, Any]]) -> bytes:
+    output = io.BytesIO()
+    pdf = canvas.Canvas(output, pagesize=landscape(A4))
+    width, height = landscape(A4)
+    y = height - 40
+    pdf.setFont("Helvetica-Bold", 14)
+    pdf.drawString(40, y, title)
+    y -= 24
+    pdf.setFont("Helvetica", 9)
+
+    if not rows:
+        pdf.drawString(40, y, "No hay datos para este informe")
+    else:
+        columns = list(rows[0].keys())[:6]
+        column_width = (width - 80) / max(len(columns), 1)
+        for index, column in enumerate(columns):
+            pdf.drawString(40 + (index * column_width), y, str(column)[:24])
+        y -= 18
+
+        for row in rows[:60]:
+            if y < 40:
+                pdf.showPage()
+                y = height - 40
+                pdf.setFont("Helvetica", 9)
+            for index, column in enumerate(columns):
+                value = row.get(column, "")
+                if isinstance(value, (list, dict)):
+                    value = json.dumps(value, ensure_ascii=False)
+                pdf.drawString(40 + (index * column_width), y, str(value)[:28])
+            y -= 16
+
+    pdf.save()
+    output.seek(0)
+    return output.getvalue()
 
 
 def build_line_items(raw_items: List[Dict[str, Any]], products_by_id: Dict[str, ProductModel]) -> tuple[List[Dict[str, Any]], float]:
@@ -1021,6 +1293,11 @@ def try_direct_read_response(user_message: str, user: UserModel, db: Session) ->
 @app.on_event("startup")
 def startup() -> None:
     PublicBase.metadata.create_all(bind=engine)
+    with PublicSessionLocal() as db:
+        companies = db.query(CompanyModel).all()
+        for company in companies:
+            tenant_bind = get_tenant_bind(company.schema_name)
+            TenantBase.metadata.create_all(bind=tenant_bind)
 
 
 @app.get("/health")
@@ -1738,9 +2015,24 @@ def update_invoice(invoice_id: str, data: Dict[str, Any], user: UserModel = Depe
 @app.delete("/api/invoices/{invoice_id}")
 def delete_invoice(invoice_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "sales.write")
-    company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id).delete()
+    item = first_or_404(
+        company_filter(db.query(InvoiceModel), InvoiceModel, user).filter(InvoiceModel.invoice_id == invoice_id),
+        "Invoice not found",
+    )
+    existing_return = company_filter(db.query(ReturnModel), ReturnModel, user).filter(
+        ReturnModel.return_type == "sales", ReturnModel.source_document_id == item.invoice_id
+    ).first()
+    if existing_return:
+        raise HTTPException(
+            status_code=400,
+            detail="This invoice already has linked returns. Cancel the linked return before deleting the invoice.",
+        )
+
+    warehouse_id = get_invoice_inventory_warehouse_id(db, user, item, "sales")
+    adjust_inventory_stock(db, user, item.items or [], warehouse_id, movement="in")
+    db.delete(item)
     db.commit()
-    return {"message": "Deleted"}
+    return {"message": "Deleted and inventory restored"}
 
 
 @app.get("/api/purchase-orders")
@@ -1870,9 +2162,124 @@ def update_purchase_invoice(pinv_id: str, data: Dict[str, Any], user: UserModel 
 @app.delete("/api/purchase-invoices/{pinv_id}")
 def delete_purchase_invoice(pinv_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "purchases.write")
-    company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.pinv_id == pinv_id).delete()
+    item = first_or_404(
+        company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).filter(PurchaseInvoiceModel.pinv_id == pinv_id),
+        "Purchase invoice not found",
+    )
+    existing_return = company_filter(db.query(ReturnModel), ReturnModel, user).filter(
+        ReturnModel.return_type == "purchase", ReturnModel.source_document_id == item.pinv_id
+    ).first()
+    if existing_return:
+        raise HTTPException(
+            status_code=400,
+            detail="This purchase invoice already has linked returns. Cancel the linked return before deleting the invoice.",
+        )
+
+    warehouse_id = get_invoice_inventory_warehouse_id(db, user, item, "purchase")
+    adjust_inventory_stock(db, user, item.items or [], warehouse_id, movement="out")
+    db.delete(item)
     db.commit()
-    return {"message": "Deleted"}
+    return {"message": "Deleted and inventory restored"}
+
+
+@app.get("/api/returns")
+def get_returns(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    if not (user_has_permission(user, "sales.read") or user_has_permission(user, "purchases.read") or user_has_permission(user, "inventory.read")):
+        raise HTTPException(status_code=403, detail="Not authorized for this action")
+    items = company_filter(db.query(ReturnModel), ReturnModel, user).order_by(ReturnModel.created_at.desc()).all()
+    return [model_to_dict(item) for item in items]
+
+
+@app.post("/api/returns")
+def create_return(data: ReturnInput, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    return_type = data.return_type.strip().lower()
+    if return_type == "sales":
+        require_permission(user, "sales.write")
+    elif return_type == "purchase":
+        require_permission(user, "purchases.write")
+    else:
+        raise HTTPException(status_code=400, detail="Invalid return type")
+
+    source = get_return_source_document(db, user, return_type, data.source_document_id)
+    items, subtotal = build_return_items(source["items"], data.items)
+    tax = subtotal * 0.21
+    warehouse_id = resolve_warehouse_id(user, db, data.warehouse_id or source["warehouse_id"])
+
+    movement = "in" if return_type == "sales" else "out"
+    adjust_inventory_stock(db, user, items, warehouse_id, movement=movement)
+
+    item = ReturnModel(
+        return_id=prefixed_id("ret"),
+        return_number=generate_sequence("DEV", ReturnModel, user.company_id, db),
+        return_type=return_type,
+        source_document_id=source["source_model"].invoice_id if return_type == "sales" else source["source_model"].pinv_id,
+        source_document_number=source["number"],
+        partner_id=source["partner_id"],
+        partner_name=source["partner_name"],
+        warehouse_id=warehouse_id,
+        items=items,
+        subtotal=subtotal,
+        tax=tax,
+        total=subtotal + tax,
+        reason=data.reason,
+        company_id=user.company_id,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return model_to_dict(item)
+
+
+@app.get("/api/stock-transfers")
+def get_stock_transfers(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
+    require_permission(user, "inventory.read")
+    items = company_filter(db.query(StockTransferModel), StockTransferModel, user).order_by(StockTransferModel.created_at.desc()).all()
+    return [enrich_transfer(item) for item in items]
+
+
+@app.post("/api/stock-transfers")
+def create_stock_transfer(data: StockTransferInput, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "inventory.write")
+    if data.source_warehouse_id == data.target_warehouse_id:
+        raise HTTPException(status_code=400, detail="Source and target warehouse must be different")
+    if not data.items:
+        raise HTTPException(status_code=400, detail="Transfer must include at least one item")
+
+    resolve_warehouse_id(user, db, data.source_warehouse_id)
+    resolve_warehouse_id(user, db, data.target_warehouse_id)
+    transfer_items: List[Dict[str, Any]] = []
+    for line in data.items:
+        product_id = line.get("product_id")
+        quantity = int(line.get("quantity", 0) or 0)
+        if not product_id or quantity <= 0:
+            continue
+        product = first_or_404(company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id), "Product not found")
+        transfer_items.append(
+            {
+                "product_id": product.product_id,
+                "product_name": product.name,
+                "quantity": quantity,
+            }
+        )
+    if not transfer_items:
+        raise HTTPException(status_code=400, detail="Transfer must include at least one valid item")
+
+    adjust_inventory_stock(db, user, transfer_items, data.source_warehouse_id, movement="out")
+    adjust_inventory_stock(db, user, transfer_items, data.target_warehouse_id, movement="in")
+
+    item = StockTransferModel(
+        transfer_id=prefixed_id("mov"),
+        transfer_number=generate_sequence("TRF", StockTransferModel, user.company_id, db),
+        source_warehouse_id=data.source_warehouse_id,
+        target_warehouse_id=data.target_warehouse_id,
+        items=transfer_items,
+        notes=data.notes,
+        company_id=user.company_id,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return enrich_transfer(item)
 
 
 @app.get("/api/reports/dashboard")
@@ -1916,25 +2323,11 @@ def get_dashboard_stats(user: UserModel = Depends(get_current_user), db: Session
 @app.get("/api/reports/export/{report_type}")
 def export_report(report_type: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> StreamingResponse:
     require_permission(user, "reports.read")
-    table_map = {
-        "clients": ClientModel,
-        "suppliers": SupplierModel,
-        "products": ProductModel,
-        "inventory": InventoryModel,
-        "orders": OrderModel,
-        "invoices": InvoiceModel,
-        "purchase-orders": PurchaseOrderModel,
-        "purchase-invoices": PurchaseInvoiceModel,
-    }
-    model = table_map.get(report_type)
-    if not model:
-        raise HTTPException(status_code=400, detail="Invalid report type")
-
-    items = company_filter(db.query(model), model, user).all()
-    if not items:
+    rows = query_report_rows(report_type, user, db)
+    if not rows:
         raise HTTPException(status_code=404, detail="No data to export")
 
-    df = pd.DataFrame([model_to_dict(item) for item in items])
+    df = dataframe_for_report(rows)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=report_type)
@@ -1945,6 +2338,195 @@ def export_report(report_type: str, user: UserModel = Depends(get_current_user),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={report_type}.xlsx"},
     )
+
+
+@app.get("/api/reports/query/{report_type}")
+def get_report_preview(
+    report_type: str,
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    client_id: Optional[str] = Query(default=None),
+    supplier_id: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    sort_by: Optional[str] = Query(default=None),
+    sort_direction: str = Query(default="desc"),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    require_permission(user, "reports.read")
+    rows = query_report_rows(
+        report_type,
+        user,
+        db,
+        date_from=date_from,
+        date_to=date_to,
+        client_id=client_id,
+        supplier_id=supplier_id,
+        status=status,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+    )
+    totals = {
+        "rows": len(rows),
+        "total_amount": sum(float(row.get("total", 0) or 0) for row in rows),
+        "outstanding_amount": sum(float(row.get("outstanding_amount", 0) or 0) for row in rows),
+    }
+    return {"rows": rows, "totals": totals}
+
+
+@app.get("/api/reports/export/{report_type}/{file_format}")
+def export_report_with_format(
+    report_type: str,
+    file_format: str,
+    date_from: Optional[str] = Query(default=None),
+    date_to: Optional[str] = Query(default=None),
+    client_id: Optional[str] = Query(default=None),
+    supplier_id: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    sort_by: Optional[str] = Query(default=None),
+    sort_direction: str = Query(default="desc"),
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    require_permission(user, "reports.read")
+    rows = query_report_rows(
+        report_type,
+        user,
+        db,
+        date_from=date_from,
+        date_to=date_to,
+        client_id=client_id,
+        supplier_id=supplier_id,
+        status=status,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="No data to export")
+
+    if file_format == "excel":
+        df = dataframe_for_report(rows)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=report_type)
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={report_type}.xlsx"},
+        )
+
+    if file_format == "pdf":
+        pdf_content = build_pdf_report(f"Informe {report_type}", rows)
+        return StreamingResponse(
+            io.BytesIO(pdf_content),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={report_type}.pdf"},
+        )
+
+    raise HTTPException(status_code=400, detail="Invalid export format")
+
+
+@app.post("/api/reports/email/{report_type}")
+def email_report(
+    report_type: str,
+    data: Dict[str, Any],
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, str]:
+    require_permission(user, "reports.read")
+    recipient = data.get("recipient")
+    if not recipient:
+        raise HTTPException(status_code=400, detail="Recipient email is required")
+
+    file_format = data.get("format", "excel")
+    rows = query_report_rows(
+        report_type,
+        user,
+        db,
+        date_from=data.get("date_from"),
+        date_to=data.get("date_to"),
+        client_id=data.get("client_id"),
+        supplier_id=data.get("supplier_id"),
+        status=data.get("status"),
+        sort_by=data.get("sort_by"),
+        sort_direction=data.get("sort_direction", "desc"),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="No data to export")
+
+    if file_format == "excel":
+        df = dataframe_for_report(rows)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name=report_type)
+        attachment = {
+            "content": output.getvalue(),
+            "maintype": "application",
+            "subtype": "vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "filename": f"{report_type}.xlsx",
+        }
+    elif file_format == "pdf":
+        attachment = {
+            "content": build_pdf_report(f"Informe {report_type}", rows),
+            "maintype": "application",
+            "subtype": "pdf",
+            "filename": f"{report_type}.pdf",
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Invalid email format")
+
+    send_email_message(
+        recipient,
+        f"Informe {report_type}",
+        f"Adjunto encontraras el informe {report_type} generado desde Starxia ERP.",
+        attachments=[attachment],
+    )
+    return {"message": "Report emailed successfully"}
+
+
+@app.get("/api/statistics/overview")
+def get_statistics_overview(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    require_permission(user, "reports.read")
+    invoices = company_filter(db.query(InvoiceModel), InvoiceModel, user).all()
+    purchase_invoices = company_filter(db.query(PurchaseInvoiceModel), PurchaseInvoiceModel, user).all()
+    products = company_filter(db.query(ProductModel), ProductModel, user).all()
+    inventory_items = company_filter(db.query(InventoryModel), InventoryModel, user).all()
+    warehouses = company_filter(db.query(WarehouseModel), WarehouseModel, user).all()
+
+    sales_by_month: Dict[str, float] = {}
+    purchases_by_month: Dict[str, float] = {}
+    product_sales: Dict[str, int] = {}
+    warehouse_stock: Dict[str, int] = {warehouse.name: 0 for warehouse in warehouses}
+    product_names = {product.product_id: product.name for product in products}
+    warehouse_names = {warehouse.warehouse_id: warehouse.name for warehouse in warehouses}
+
+    for invoice in invoices:
+        month_key = invoice.created_at.strftime("%Y-%m")
+        sales_by_month[month_key] = sales_by_month.get(month_key, 0.0) + float(invoice.total or 0)
+        for item in invoice.items or []:
+            product_name = product_names.get(item.get("product_id"), item.get("product_name") or "Producto")
+            product_sales[product_name] = product_sales.get(product_name, 0) + int(item.get("quantity", 0) or 0)
+
+    for invoice in purchase_invoices:
+        month_key = invoice.created_at.strftime("%Y-%m")
+        purchases_by_month[month_key] = purchases_by_month.get(month_key, 0.0) + float(invoice.total or 0)
+
+    for inventory_item in inventory_items:
+        warehouse_name = warehouse_names.get(inventory_item.warehouse_id, inventory_item.warehouse_id)
+        warehouse_stock[warehouse_name] = warehouse_stock.get(warehouse_name, 0) + int(inventory_item.quantity or 0)
+
+    return {
+        "sales_by_month": [{"month": month, "total": total} for month, total in sorted(sales_by_month.items())],
+        "purchases_by_month": [{"month": month, "total": total} for month, total in sorted(purchases_by_month.items())],
+        "top_products": [
+            {"name": name, "quantity": quantity}
+            for name, quantity in sorted(product_sales.items(), key=lambda item: item[1], reverse=True)[:10]
+        ],
+        "stock_by_warehouse": [{"warehouse": name, "quantity": quantity} for name, quantity in warehouse_stock.items()],
+        "receivables": sum(float(invoice.total or 0) for invoice in invoices if invoice.status != "paid"),
+        "payables": sum(float(invoice.total or 0) for invoice in purchase_invoices if invoice.status != "paid"),
+    }
 
 
 @app.get("/api/ai/chat-history")

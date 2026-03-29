@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/collapsible";
 import { useState } from "react";
 import { useAuth } from "@/App";
-import { hasPermission } from "@/lib/permissions";
+import { canAccessAny, hasPermission } from "@/lib/permissions";
 
 const Sidebar = ({ currentPath }) => {
   const { user } = useAuth();
@@ -119,7 +119,15 @@ const Sidebar = ({ currentPath }) => {
                   <Link to="/inventory" className={`sidebar-link ${isActive("/inventory") ? "active" : ""}`} data-testid="nav-inventory">
                     <span>Stock por Almacen</span>
                   </Link>
+                  <Link to="/stock-transfers" className={`sidebar-link ${isActive("/stock-transfers") ? "active" : ""}`} data-testid="nav-stock-transfers">
+                    <span>Transferencias</span>
+                  </Link>
                 </>
+              )}
+              {canAccessAny(user, ["sales.read", "purchases.read", "inventory.read"]) && (
+                <Link to="/returns" className={`sidebar-link ${isActive("/returns") ? "active" : ""}`} data-testid="nav-returns">
+                  <span>Devoluciones</span>
+                </Link>
               )}
             </CollapsibleContent>
           </Collapsible>
@@ -166,10 +174,16 @@ const Sidebar = ({ currentPath }) => {
         )}
 
         {hasPermission(user, "reports.read") && (
-          <Link to="/reports" className={`sidebar-link ${isActive("/reports") ? "active" : ""}`} data-testid="nav-reports">
-            <BarChart3 className="w-5 h-5" />
-            <span>Informes</span>
-          </Link>
+          <>
+            <Link to="/reports" className={`sidebar-link ${isActive("/reports") ? "active" : ""}`} data-testid="nav-reports">
+              <FileText className="w-5 h-5" />
+              <span>Informes</span>
+            </Link>
+            <Link to="/statistics" className={`sidebar-link ${isActive("/statistics") ? "active" : ""}`} data-testid="nav-statistics">
+              <BarChart3 className="w-5 h-5" />
+              <span>Estadisticas</span>
+            </Link>
+          </>
         )}
 
         {hasPermission(user, "ai.read") && (

@@ -4,7 +4,7 @@ import { useEffect, useState, createContext, useContext, useCallback } from "rea
 import axios from "axios";
 import { Toaster } from "@/components/ui/sonner";
 import { API_BASE } from "@/lib/api";
-import { hasPermission } from "@/lib/permissions";
+import { canAccessAny, hasPermission } from "@/lib/permissions";
 
 // Pages
 import Landing from "@/pages/Landing";
@@ -22,7 +22,10 @@ import Invoices from "@/pages/Invoices";
 import PurchaseOrders from "@/pages/PurchaseOrders";
 import PurchaseInvoices from "@/pages/PurchaseInvoices";
 import Reports from "@/pages/Reports";
+import Returns from "@/pages/Returns";
 import Settings from "@/pages/Settings";
+import Statistics from "@/pages/Statistics";
+import StockTransfers from "@/pages/StockTransfers";
 import AIAssistant from "@/pages/AIAssistant";
 
 const API = API_BASE;
@@ -70,7 +73,7 @@ export const AuthProvider = ({ children }) => {
 };
 
 // Protected Route
-const ProtectedRoute = ({ children, permission }) => {
+const ProtectedRoute = ({ children, permission, anyPermissions }) => {
   const { user, loading } = useAuth();
 
   if (loading) {
@@ -86,6 +89,10 @@ const ProtectedRoute = ({ children, permission }) => {
   }
 
   if (permission && !hasPermission(user, permission)) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  if (anyPermissions && !canAccessAny(user, anyPermissions)) {
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -106,11 +113,14 @@ const AppRouter = () => {
       <Route path="/product-types" element={<ProtectedRoute permission="products.read"><ProductTypes /></ProtectedRoute>} />
       <Route path="/warehouses" element={<ProtectedRoute permission="inventory.read"><Warehouses /></ProtectedRoute>} />
       <Route path="/inventory" element={<ProtectedRoute permission="inventory.read"><Inventory /></ProtectedRoute>} />
+      <Route path="/stock-transfers" element={<ProtectedRoute permission="inventory.read"><StockTransfers /></ProtectedRoute>} />
+      <Route path="/returns" element={<ProtectedRoute anyPermissions={["sales.read", "purchases.read", "inventory.read"]}><Returns /></ProtectedRoute>} />
       <Route path="/orders" element={<ProtectedRoute permission="sales.read"><Orders /></ProtectedRoute>} />
       <Route path="/invoices" element={<ProtectedRoute permission="sales.read"><Invoices /></ProtectedRoute>} />
       <Route path="/purchase-orders" element={<ProtectedRoute permission="purchases.read"><PurchaseOrders /></ProtectedRoute>} />
       <Route path="/purchase-invoices" element={<ProtectedRoute permission="purchases.read"><PurchaseInvoices /></ProtectedRoute>} />
       <Route path="/reports" element={<ProtectedRoute permission="reports.read"><Reports /></ProtectedRoute>} />
+      <Route path="/statistics" element={<ProtectedRoute permission="reports.read"><Statistics /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute permission="settings.read"><Settings /></ProtectedRoute>} />
       <Route path="/ai-assistant" element={<ProtectedRoute permission="ai.read"><AIAssistant /></ProtectedRoute>} />
     </Routes>

@@ -174,7 +174,7 @@ const PurchaseInvoices = () => {
     if (!window.confirm("Estas seguro de eliminar esta factura de compra?")) return;
     try {
       await axios.delete(`${API}/purchase-invoices/${invoiceId}`, { withCredentials: true });
-      toast.success("Factura eliminada");
+      toast.success("Factura eliminada y stock revertido");
       fetchData();
     } catch (error) {
       toast.error(error.response?.data?.detail || "Error al eliminar factura");
