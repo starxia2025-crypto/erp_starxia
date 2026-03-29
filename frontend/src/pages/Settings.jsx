@@ -73,6 +73,7 @@ const Settings = () => {
     phone: "",
     email: "",
     billing_email: "",
+    logo_url: "",
     verifactu_enabled: true,
     aeat_submission_enabled: false,
   });
@@ -130,6 +131,7 @@ const Settings = () => {
           phone: currentCompany.phone || "",
           email: currentCompany.email || "",
           billing_email: currentCompany.billing_email || "",
+          logo_url: currentCompany.logo_url || "",
           verifactu_enabled: Boolean(currentCompany.verifactu_enabled),
           aeat_submission_enabled: Boolean(currentCompany.aeat_submission_enabled),
         });
@@ -389,6 +391,29 @@ const Settings = () => {
                     <Field label="Telefono">
                       <Input value={formData.phone} onChange={(event) => setFormData({ ...formData, phone: event.target.value })} disabled={!canEditCompany} />
                     </Field>
+                    <Field label="Logo de la empresa (URL)" className="md:col-span-2">
+                      <div className="space-y-3">
+                        <Input
+                          type="url"
+                          placeholder="https://tudominio.com/logo.png"
+                          value={formData.logo_url}
+                          onChange={(event) => setFormData({ ...formData, logo_url: event.target.value })}
+                          disabled={!canEditCompany}
+                        />
+                        {formData.logo_url ? (
+                          <div className="flex items-center gap-3 rounded-md border border-border bg-muted/30 p-3">
+                            <img
+                              src={formData.logo_url}
+                              alt={formData.name || "Logo empresa"}
+                              className="h-12 w-12 rounded-md border border-border object-cover"
+                            />
+                            <p className="text-sm text-muted-foreground">
+                              Asi se mostrara el logo en el menu lateral.
+                            </p>
+                          </div>
+                        ) : null}
+                      </div>
+                    </Field>
                     <div className="space-y-3 rounded-lg border border-border p-4 md:col-span-2">
                       <Label className="text-sm font-medium">Cumplimiento fiscal</Label>
                       <label className="flex items-center gap-3 text-sm">
@@ -420,7 +445,7 @@ const Settings = () => {
                       Documentacion legal aceptada
                     </div>
                     {pendingDocuments.length > 0 && (
-                      <div className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
+                      <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm font-medium text-amber-950">
                         Hay documentos pendientes de reaceptacion por cambio de version.
                       </div>
                     )}

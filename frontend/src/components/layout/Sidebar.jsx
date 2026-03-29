@@ -31,15 +31,34 @@ const Sidebar = ({ currentPath }) => {
   const [purchasesOpen, setPurchasesOpen] = useState(currentPath.includes("/purchase"));
 
   const isActive = (path) => currentPath === path;
+  const companyName = user?.company_name || "Business Hub";
+  const companyLogoUrl = user?.company_logo_url || "";
+  const companyInitials = companyName
+    .split(" ")
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2) || "BH";
 
   return (
     <aside className="w-64 min-h-screen bg-card border-r border-border flex flex-col">
       <div className="p-6 border-b border-border">
         <Link to="/dashboard" className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-md bg-primary flex items-center justify-center">
-            <span className="text-primary-foreground font-bold text-sm">CRM</span>
+          {companyLogoUrl ? (
+            <img
+              src={companyLogoUrl}
+              alt={companyName}
+              className="h-10 w-10 rounded-md border border-border object-cover"
+            />
+          ) : (
+            <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary">
+              <span className="text-sm font-bold text-primary-foreground">{companyInitials}</span>
+            </div>
+          )}
+          <div className="min-w-0">
+            <span className="block truncate font-semibold text-lg">{companyName}</span>
+            <span className="block truncate text-xs text-muted-foreground">ERP multiempresa</span>
           </div>
-          <span className="font-semibold text-lg">Business Hub</span>
         </Link>
       </div>
 

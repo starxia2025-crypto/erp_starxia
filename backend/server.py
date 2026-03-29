@@ -93,6 +93,7 @@ class CompanyModel(PublicBase, TimestampMixin):
     phone = mapped_column(String(64))
     email = mapped_column(String(255))
     billing_email = mapped_column(String(255))
+    logo_url = mapped_column(Text)
     fiscal_series_config = mapped_column(JSON, default=dict, nullable=False)
     verifactu_enabled = mapped_column(Boolean, default=True, nullable=False)
     aeat_submission_enabled = mapped_column(Boolean, default=False, nullable=False)
@@ -872,6 +873,11 @@ def get_required_legal_reacceptances(db: Session, user: UserModel) -> List[Dict[
 def serialize_user(user: UserModel) -> Dict[str, Any]:
     data = model_to_dict(user, exclude={"password_hash"})
     data["permissions"] = sorted(permissions_for_role(user.role))
+    company = getattr(user, "company", None)
+    if company is not None:
+        data["company_name"] = company.legal_name or company.name
+        data["company_logo_url"] = company.logo_url
+        data["company_legal_name"] = company.legal_name
     return data
 
 
@@ -922,6 +928,7 @@ def apply_public_migrations() -> None:
         'ALTER TABLE companies ADD COLUMN IF NOT EXISTS legal_name VARCHAR(255)',
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS country VARCHAR(2) NOT NULL DEFAULT 'ES'",
         'ALTER TABLE companies ADD COLUMN IF NOT EXISTS billing_email VARCHAR(255)',
+        'ALTER TABLE companies ADD COLUMN IF NOT EXISTS logo_url TEXT',
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS fiscal_series_config JSONB NOT NULL DEFAULT '{}'::jsonb",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS verifactu_enabled BOOLEAN NOT NULL DEFAULT TRUE",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS aeat_submission_enabled BOOLEAN NOT NULL DEFAULT FALSE",
@@ -2514,6 +2521,7 @@ def register(data: RegisterInput, request: Request, response: Response, db: Sess
     finally:
         tenant_db.close()
 
+    setattr(user, "company", company)
     set_auth_cookie(response, create_access_token(user))
     return serialize_user(user)
 
@@ -2527,6 +2535,7 @@ def login(data: LoginInput, response: Response, db: Session = Depends(get_public
     if not company:
         raise HTTPException(status_code=401, detail="Company not found")
     setattr(user, "company_schema", company.schema_name)
+    setattr(user, "company", company)
 
     log_security_event(
         db,
@@ -2544,6 +2553,9 @@ def login(data: LoginInput, response: Response, db: Session = Depends(get_public
 
 @app.get("/api/auth/me")
 def get_me(user: UserModel = Depends(get_current_user), db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+    company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    if company:
+        setattr(user, "company", company)
     data = serialize_user(user)
     data["pending_legal_documents"] = get_required_legal_reacceptances(db, user)
     return data
@@ -2614,6 +2626,7 @@ def update_company(
         "phone",
         "email",
         "billing_email",
+        "logo_url",
         "fiscal_series_config",
         "verifactu_enabled",
         "aeat_submission_enabled",
