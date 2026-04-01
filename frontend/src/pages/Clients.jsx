@@ -21,7 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Plus, Search, Edit, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, getApiErrorMessage } from "@/lib/api";
 
 const API = API_BASE;
 
@@ -80,7 +80,7 @@ const Clients = () => {
       resetForm();
       fetchClients();
     } catch (error) {
-      toast.error("Error al guardar cliente");
+      toast.error(getApiErrorMessage(error, "Error al guardar cliente"));
     }
   };
 
@@ -104,7 +104,7 @@ const Clients = () => {
         toast.success("Cliente eliminado");
         fetchClients();
       } catch (error) {
-        toast.error("Error al eliminar cliente");
+        toast.error(getApiErrorMessage(error, "Error al eliminar cliente"));
       }
     }
   };

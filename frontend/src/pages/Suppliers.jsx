@@ -21,7 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Plus, Search, Edit, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, getApiErrorMessage } from "@/lib/api";
 
 const API = API_BASE;
 
@@ -80,7 +80,7 @@ const Suppliers = () => {
       resetForm();
       fetchSuppliers();
     } catch (error) {
-      toast.error("Error al guardar proveedor");
+      toast.error(getApiErrorMessage(error, "Error al guardar proveedor"));
     }
   };
 
@@ -104,7 +104,7 @@ const Suppliers = () => {
         toast.success("Proveedor eliminado");
         fetchSuppliers();
       } catch (error) {
-        toast.error("Error al eliminar proveedor");
+        toast.error(getApiErrorMessage(error, "Error al eliminar proveedor"));
       }
     }
   };

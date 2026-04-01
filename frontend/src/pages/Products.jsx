@@ -4,7 +4,7 @@ import { Edit, Plus, Search, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 import Layout from "@/components/layout/Layout";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, getApiErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -53,7 +53,7 @@ const Products = () => {
       const response = await axios.get(`${API}/products`, { withCredentials: true });
       setProducts(response.data);
     } catch (error) {
-      toast.error("Error al cargar productos");
+      toast.error(getApiErrorMessage(error, "Error al cargar productos"));
     } finally {
       setLoading(false);
     }
@@ -64,7 +64,7 @@ const Products = () => {
       const response = await axios.get(`${API}/product-types`, { withCredentials: true });
       setProductTypes(response.data);
     } catch (error) {
-      toast.error("Error al cargar tipos de producto");
+      toast.error(getApiErrorMessage(error, "Error al cargar tipos de producto"));
     }
   };
 

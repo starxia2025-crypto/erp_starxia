@@ -21,7 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Plus, Search, Eye, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import axios from "axios";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, getApiErrorMessage } from "@/lib/api";
 
 const API = API_BASE;
 
@@ -101,7 +101,7 @@ const Orders = () => {
       resetForm();
       fetchData();
     } catch (error) {
-      toast.error("Error al crear pedido");
+      toast.error(getApiErrorMessage(error, "Error al crear pedido"));
     }
   };
 
@@ -111,7 +111,7 @@ const Orders = () => {
       toast.success("Estado actualizado");
       fetchData();
     } catch (error) {
-      toast.error("Error al actualizar estado");
+      toast.error(getApiErrorMessage(error, "Error al actualizar estado"));
     }
   };
 
@@ -122,7 +122,7 @@ const Orders = () => {
         toast.success("Pedido eliminado");
         fetchData();
       } catch (error) {
-        toast.error("Error al eliminar pedido");
+        toast.error(getApiErrorMessage(error, "Error al eliminar pedido"));
       }
     }
   };

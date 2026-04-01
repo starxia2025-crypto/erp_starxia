@@ -69,6 +69,7 @@ const Landing = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const resetToken = searchParams.get("reset_token") || "";
+  const demoModeRequested = (searchParams.get("mode") || "").toLowerCase() === "demo";
 
   const [loginForm, setLoginForm] = useState(initialLogin);
   const [registerForm, setRegisterForm] = useState(initialRegister);
@@ -132,6 +133,7 @@ const Landing = () => {
         company_address: registerForm.company_address || null,
         company_phone: registerForm.company_phone || null,
         company_email: registerForm.company_email || null,
+        account_mode: demoModeRequested ? "demo" : "standard",
         accept_terms: consents.terms,
         accept_privacy: consents.privacy,
       };
@@ -284,7 +286,7 @@ const Landing = () => {
                   </Button>
                 </form>
               ) : (
-                <Tabs defaultValue="login" className="space-y-6">
+                <Tabs defaultValue={demoModeRequested ? "register" : "login"} className="space-y-6">
                   <TabsList className="grid w-full grid-cols-2">
                     <TabsTrigger value="login">Iniciar sesion</TabsTrigger>
                     <TabsTrigger value="register">Crear cuenta</TabsTrigger>
@@ -344,6 +346,11 @@ const Landing = () => {
 
                   <TabsContent value="register">
                     <form className="space-y-4" onSubmit={handleRegister}>
+                      {demoModeRequested && (
+                        <div className={`rounded-xl border p-4 text-sm ${isDark ? "border-primary/30 bg-primary/10 text-zinc-100" : "border-primary/20 bg-primary/10 text-zinc-900"}`}>
+                          Estas creando una <strong>cuenta DEMO de 7 dias</strong>. Al entrar podras elegir si quieres datos de ejemplo o empezar en blanco.
+                        </div>
+                      )}
                       <div className="space-y-2">
                         <Label htmlFor="register-company" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Empresa</Label>
                         <Input
@@ -469,7 +476,7 @@ const Landing = () => {
                         </label>
                       </div>
                       <Button className="w-full" type="submit" disabled={submitting}>
-                        {submitting ? "Creando..." : "Crear empresa y acceder"}
+                        {submitting ? "Creando..." : demoModeRequested ? "Crear demo y acceder" : "Crear empresa y acceder"}
                       </Button>
                     </form>
                   </TabsContent>

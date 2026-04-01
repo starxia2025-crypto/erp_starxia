@@ -104,6 +104,11 @@ class CompanyModel(PublicBase, TimestampMixin):
     fiscal_series_config = mapped_column(JSON, default=dict, nullable=False)
     verifactu_enabled = mapped_column(Boolean, default=True, nullable=False)
     aeat_submission_enabled = mapped_column(Boolean, default=False, nullable=False)
+    account_mode = mapped_column(String(16), default="standard", nullable=False)
+    demo_initialized_at = mapped_column(DateTime(timezone=True))
+    demo_seeded = mapped_column(Boolean, default=False, nullable=False)
+    demo_record_limit = mapped_column(Integer, default=20, nullable=False)
+    demo_expires_at = mapped_column(DateTime(timezone=True))
 
 
 class LegalDocumentModel(PublicBase, TimestampMixin):
@@ -409,6 +414,16 @@ class StockTransferModel(TenantBase, TimestampMixin):
     company_id = mapped_column(String(32), nullable=False, index=True)
 
 
+class DemoSeedRecordModel(TenantBase, TimestampMixin):
+    __tablename__ = "demo_seed_records"
+    __table_args__ = (UniqueConstraint("entity_type", "entity_id", name="uq_demo_seed_records_entity"),)
+
+    record_id = mapped_column(String(32), primary_key=True)
+    entity_type = mapped_column(String(64), nullable=False, index=True)
+    entity_id = mapped_column(String(32), nullable=False, index=True)
+    company_id = mapped_column(String(32), nullable=False, index=True)
+
+
 class ChatMessageModel(TenantBase, TimestampMixin):
     __tablename__ = "chat_messages"
 
@@ -428,8 +443,13 @@ class RegisterInput(BaseModel):
     company_address: Optional[str] = None
     company_phone: Optional[str] = None
     company_email: Optional[EmailStr] = None
+    account_mode: str = "standard"
     accept_terms: bool = False
     accept_privacy: bool = False
+
+
+class DemoInitializationInput(BaseModel):
+    use_sample_data: bool = True
 
 
 class LegalAcceptanceInput(BaseModel):
@@ -444,6 +464,43 @@ class LegalDocumentPublishInput(BaseModel):
     title: str
     content: str
     requires_acceptance: bool = True
+
+
+DEMO_ACCOUNT_MODE = "demo"
+DEMO_RECORD_LIMIT_DEFAULT = 20
+DEMO_DURATION_DAYS = 7
+DEMO_LIMITED_MODELS = {
+    "clients": ClientModel,
+    "suppliers": SupplierModel,
+    "products": ProductModel,
+    "inventory": WarehouseModel,
+    "orders": OrderModel,
+    "invoices": InvoiceModel,
+    "purchase_orders": PurchaseOrderModel,
+    "purchase_invoices": PurchaseInvoiceModel,
+}
+DEMO_ENTITY_TO_MODULE = {
+    "client": "clients",
+    "supplier": "suppliers",
+    "product": "products",
+    "order": "orders",
+    "invoice": "invoices",
+    "purchase_order": "purchase_orders",
+    "purchase_invoice": "purchase_invoices",
+    "warehouse": "inventory",
+    "return": "inventory",
+    "stock_transfer": "inventory",
+}
+DEMO_MODULE_LABELS = {
+    "clients": "clientes",
+    "suppliers": "proveedores",
+    "products": "productos",
+    "orders": "pedidos",
+    "invoices": "facturas de venta",
+    "purchase_orders": "ordenes de compra",
+    "purchase_invoices": "facturas de compra",
+    "inventory": "operaciones de inventario",
+}
 
 
 class LoginInput(BaseModel):
@@ -856,6 +913,101 @@ def require_permission(user: UserModel, permission: str) -> None:
         raise HTTPException(status_code=403, detail="Not authorized for this action")
 
 
+def get_user_company(user: UserModel) -> Optional[CompanyModel]:
+    return getattr(user, "company", None)
+
+
+def is_demo_company(user: UserModel) -> bool:
+    company = get_user_company(user)
+    return bool(company and company.account_mode == DEMO_ACCOUNT_MODE)
+
+
+def ensure_demo_initialized(user: UserModel) -> None:
+    company = get_user_company(user)
+    if company and company.account_mode == DEMO_ACCOUNT_MODE and not company.demo_initialized_at:
+        raise HTTPException(
+            status_code=409,
+            detail="Primero elige si quieres empezar la demo con datos de ejemplo o con un entorno en blanco.",
+        )
+
+
+def get_demo_limit_for_user(user: UserModel) -> int:
+    company = get_user_company(user)
+    return company.demo_record_limit if company and company.demo_record_limit else DEMO_RECORD_LIMIT_DEFAULT
+
+
+def ensure_demo_capacity(db: Session, user: UserModel, module_key: str, extra_rows: int = 1) -> None:
+    ensure_demo_initialized(user)
+    if not is_demo_company(user):
+        return
+    model = DEMO_LIMITED_MODELS.get(module_key)
+    if not model:
+        return
+    current_count = company_filter(db.query(model), model, user).count()
+    limit = get_demo_limit_for_user(user)
+    if current_count + extra_rows > limit:
+        module_label = DEMO_MODULE_LABELS.get(module_key, module_key)
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Has alcanzado el limite demo de {limit} registros en {module_label}. "
+                "Mejora tu plan para seguir anadiendo informacion."
+            ),
+        )
+
+
+def register_demo_seed_record(db: Session, user: UserModel, entity_type: str, entity_id: str) -> None:
+    db.add(
+        DemoSeedRecordModel(
+            record_id=prefixed_id("dseed"),
+            entity_type=entity_type,
+            entity_id=entity_id,
+            company_id=user.company_id,
+        )
+    )
+
+
+def protect_demo_seed_delete(db: Session, user: UserModel, entity_type: str, entity_id: str) -> None:
+    if not is_demo_company(user):
+        return
+    protected = (
+        company_filter(db.query(DemoSeedRecordModel), DemoSeedRecordModel, user)
+        .filter(DemoSeedRecordModel.entity_type == entity_type, DemoSeedRecordModel.entity_id == entity_id)
+        .first()
+    )
+    if protected:
+        raise HTTPException(
+            status_code=403,
+            detail="Los datos de ejemplo de la demo no se pueden eliminar. Puedes editarlos o mejorar el plan.",
+        )
+
+
+def get_or_create_inventory_record(
+    db: Session,
+    user: UserModel,
+    product_id: str,
+    warehouse_id: str,
+    quantity: int = 0,
+    min_stock: int = 0,
+) -> InventoryModel:
+    inventory = company_filter(db.query(InventoryModel), InventoryModel, user).filter(
+        InventoryModel.product_id == product_id,
+        InventoryModel.warehouse_id == warehouse_id,
+    ).first()
+    if inventory:
+        return inventory
+    inventory = InventoryModel(
+        inventory_id=prefixed_id("inv"),
+        product_id=product_id,
+        warehouse_id=warehouse_id,
+        quantity=quantity,
+        min_stock=min_stock,
+        company_id=user.company_id,
+    )
+    db.add(inventory)
+    return inventory
+
+
 def get_active_legal_documents(db: Session, requires_acceptance: Optional[bool] = None) -> List[LegalDocumentModel]:
     query = db.query(LegalDocumentModel).filter(LegalDocumentModel.is_active.is_(True))
     if requires_acceptance is not None:
@@ -914,6 +1066,11 @@ def serialize_user(user: UserModel) -> Dict[str, Any]:
         data["company_name"] = company.legal_name or company.name
         data["company_logo_url"] = company.logo_url
         data["company_legal_name"] = company.legal_name
+        data["company_account_mode"] = company.account_mode
+        data["company_demo_initialized"] = bool(company.demo_initialized_at)
+        data["company_demo_seeded"] = bool(company.demo_seeded)
+        data["company_demo_record_limit"] = company.demo_record_limit
+        data["company_demo_expires_at"] = serialize_datetime(company.demo_expires_at) if company.demo_expires_at else None
     return data
 
 
@@ -972,6 +1129,11 @@ def apply_public_migrations() -> None:
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS country VARCHAR(2) NOT NULL DEFAULT 'ES'",
         'ALTER TABLE companies ADD COLUMN IF NOT EXISTS billing_email VARCHAR(255)',
         'ALTER TABLE companies ADD COLUMN IF NOT EXISTS logo_url TEXT',
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS account_mode VARCHAR(16) NOT NULL DEFAULT 'standard'",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS demo_initialized_at TIMESTAMPTZ",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS demo_seeded BOOLEAN NOT NULL DEFAULT FALSE",
+        f"ALTER TABLE companies ADD COLUMN IF NOT EXISTS demo_record_limit INTEGER NOT NULL DEFAULT {DEMO_RECORD_LIMIT_DEFAULT}",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS demo_expires_at TIMESTAMPTZ",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS fiscal_series_config JSONB NOT NULL DEFAULT '{}'::jsonb",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS verifactu_enabled BOOLEAN NOT NULL DEFAULT TRUE",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS aeat_submission_enabled BOOLEAN NOT NULL DEFAULT FALSE",
@@ -1086,6 +1248,16 @@ def apply_tenant_migrations(schema_name: str) -> None:
             hash_current VARCHAR(128) NOT NULL,
             hash_previous VARCHAR(128),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {schema}.demo_seed_records (
+            record_id VARCHAR(32) PRIMARY KEY,
+            entity_type VARCHAR(64) NOT NULL,
+            entity_id VARCHAR(32) NOT NULL,
+            company_id VARCHAR(32) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_demo_seed_records_entity UNIQUE (entity_type, entity_id)
         )
         """,
     ]
@@ -1286,7 +1458,10 @@ def get_current_user(
     company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
     if not company:
         raise HTTPException(status_code=401, detail="Company not found")
+    if company.account_mode == DEMO_ACCOUNT_MODE and company.demo_expires_at and company.demo_expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=403, detail="La demo de esta empresa ha expirado. Mejora el plan para seguir usando el ERP.")
     setattr(user, "company_schema", company.schema_name)
+    setattr(user, "company", company)
     return user
 
 
@@ -1886,6 +2061,247 @@ def lookup_products(db: Session, user: UserModel, raw_items: List[Dict[str, Any]
     return {product.product_id: product for product in products}
 
 
+def initialize_demo_company_data(
+    public_db: Session,
+    user: UserModel,
+    use_sample_data: bool,
+) -> Dict[str, Any]:
+    company = public_db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    if company.account_mode != DEMO_ACCOUNT_MODE:
+        raise HTTPException(status_code=400, detail="Esta empresa no esta configurada como demo.")
+    if company.demo_initialized_at:
+        raise HTTPException(status_code=400, detail="La demo ya fue inicializada anteriormente.")
+
+    tenant_db = TenantSessionLocal(bind=get_tenant_bind(company.schema_name))
+    created_summary = {
+        "sample_mode": use_sample_data,
+        "clients": 0,
+        "suppliers": 0,
+        "products": 0,
+        "orders": 0,
+        "invoices": 0,
+        "purchase_orders": 0,
+        "purchase_invoices": 0,
+    }
+
+    try:
+        main_warehouse = get_default_warehouse(user, tenant_db)
+        if use_sample_data:
+            product_type = ProductTypeModel(
+                type_id=prefixed_id("pt"),
+                name="Demo general",
+                description="Tipo creado para la demo",
+                company_id=user.company_id,
+            )
+            client_type = ClientTypeModel(
+                type_id=prefixed_id("ct"),
+                name="Demo retail",
+                description="Clientes de ejemplo para la demo",
+                company_id=user.company_id,
+            )
+            supplier_type = SupplierTypeModel(
+                type_id=prefixed_id("st"),
+                name="Demo distribucion",
+                description="Proveedores de ejemplo para la demo",
+                company_id=user.company_id,
+            )
+            tenant_db.add_all([product_type, client_type, supplier_type])
+
+            clients: List[ClientModel] = []
+            suppliers: List[SupplierModel] = []
+            products: List[ProductModel] = []
+
+            for index in range(10):
+                client = ClientModel(
+                    client_id=prefixed_id("cli"),
+                    name=f"Cliente Demo {index + 1}",
+                    email=f"cliente{index + 1}@demo.starxia.test",
+                    phone=f"600000{index + 1:03d}",
+                    address=f"Calle Cliente {index + 1}, Madrid",
+                    tax_id=f"CLI{index + 1:03d}DEMO",
+                    type_id=client_type.type_id,
+                    balance=0.0,
+                    company_id=user.company_id,
+                )
+                supplier = SupplierModel(
+                    supplier_id=prefixed_id("sup"),
+                    name=f"Proveedor Demo {index + 1}",
+                    email=f"proveedor{index + 1}@demo.starxia.test",
+                    phone=f"700000{index + 1:03d}",
+                    address=f"Poligono Industrial {index + 1}, Valencia",
+                    tax_id=f"SUP{index + 1:03d}DEMO",
+                    type_id=supplier_type.type_id,
+                    balance=0.0,
+                    company_id=user.company_id,
+                )
+                product = ProductModel(
+                    product_id=prefixed_id("prod"),
+                    sku=f"DEMO-{index + 1:03d}",
+                    name=f"Producto Demo {index + 1}",
+                    description=f"Producto de ejemplo numero {index + 1} para la demo",
+                    price=29.9 + index,
+                    cost=15.5 + index,
+                    type_id=product_type.type_id,
+                    company_id=user.company_id,
+                )
+                clients.append(client)
+                suppliers.append(supplier)
+                products.append(product)
+
+            tenant_db.add_all(clients + suppliers + products)
+            tenant_db.flush()
+
+            for client in clients:
+                register_demo_seed_record(tenant_db, user, "client", client.client_id)
+            for supplier in suppliers:
+                register_demo_seed_record(tenant_db, user, "supplier", supplier.supplier_id)
+            for product in products:
+                register_demo_seed_record(tenant_db, user, "product", product.product_id)
+                inventory = get_or_create_inventory_item(tenant_db, user, product.product_id, main_warehouse.warehouse_id)
+                inventory.quantity = 30
+                inventory.min_stock = 5
+                inventory.updated_at = datetime.now(timezone.utc)
+
+            purchase_orders: List[PurchaseOrderModel] = []
+            purchase_invoices: List[PurchaseInvoiceModel] = []
+            orders: List[OrderModel] = []
+            invoices: List[InvoiceModel] = []
+
+            for index in range(10):
+                product = products[index]
+                supplier = suppliers[index]
+                client = clients[index]
+                purchase_item = [
+                    {
+                        "product_id": product.product_id,
+                        "product_name": product.name,
+                        "quantity": 5,
+                        "price": float(product.cost),
+                        "total": float(product.cost) * 5,
+                    }
+                ]
+                sale_item = [
+                    {
+                        "product_id": product.product_id,
+                        "product_name": product.name,
+                        "quantity": 2,
+                        "price": float(product.price),
+                        "total": float(product.price) * 2,
+                    }
+                ]
+
+                purchase_order = PurchaseOrderModel(
+                    po_id=prefixed_id("po"),
+                    po_number=f"OC-DEMO-{index + 1:03d}",
+                    supplier_id=supplier.supplier_id,
+                    supplier_name=supplier.name,
+                    items=purchase_item,
+                    subtotal=float(product.cost) * 5,
+                    tax=(float(product.cost) * 5) * 0.21,
+                    total=(float(product.cost) * 5) * 1.21,
+                    status="confirmed",
+                    warehouse_id=main_warehouse.warehouse_id,
+                    company_id=user.company_id,
+                )
+                purchase_invoice = PurchaseInvoiceModel(
+                    pinv_id=prefixed_id("pinv"),
+                    invoice_number=f"FC-DEMO-{index + 1:03d}",
+                    supplier_id=supplier.supplier_id,
+                    supplier_name=supplier.name,
+                    po_id=purchase_order.po_id,
+                    items=purchase_item,
+                    subtotal=float(product.cost) * 5,
+                    tax=(float(product.cost) * 5) * 0.21,
+                    total=(float(product.cost) * 5) * 1.21,
+                    status="pending",
+                    due_date=datetime.now(timezone.utc) + timedelta(days=15),
+                    company_id=user.company_id,
+                )
+                order = OrderModel(
+                    order_id=prefixed_id("ord"),
+                    order_number=f"PED-DEMO-{index + 1:03d}",
+                    client_id=client.client_id,
+                    client_name=client.name,
+                    items=sale_item,
+                    subtotal=float(product.price) * 2,
+                    tax=(float(product.price) * 2) * 0.21,
+                    total=(float(product.price) * 2) * 1.21,
+                    status="confirmed",
+                    warehouse_id=main_warehouse.warehouse_id,
+                    company_id=user.company_id,
+                )
+                invoice = InvoiceModel(
+                    invoice_id=prefixed_id("inv"),
+                    series="D",
+                    number=index + 1,
+                    invoice_number=f"D-{str(index + 1).zfill(6)}",
+                    client_id=client.client_id,
+                    client_name=client.name,
+                    order_id=order.order_id,
+                    issue_date=datetime.now(timezone.utc),
+                    operation_date=datetime.now(timezone.utc),
+                    invoice_type="complete",
+                    simplified=False,
+                    items=sale_item,
+                    subtotal=float(product.price) * 2,
+                    tax=(float(product.price) * 2) * 0.21,
+                    total=(float(product.price) * 2) * 1.21,
+                    currency="EUR",
+                    status="issued",
+                    immutable_at=datetime.now(timezone.utc),
+                    due_date=datetime.now(timezone.utc) + timedelta(days=10),
+                    company_id=user.company_id,
+                )
+                purchase_orders.append(purchase_order)
+                purchase_invoices.append(purchase_invoice)
+                orders.append(order)
+                invoices.append(invoice)
+
+            tenant_db.add_all(purchase_orders + purchase_invoices + orders + invoices)
+            tenant_db.flush()
+
+            for item in purchase_orders:
+                register_demo_seed_record(tenant_db, user, "purchase_order", item.po_id)
+            for item in purchase_invoices:
+                register_demo_seed_record(tenant_db, user, "purchase_invoice", item.pinv_id)
+            for item in orders:
+                register_demo_seed_record(tenant_db, user, "order", item.order_id)
+            for item in invoices:
+                register_demo_seed_record(tenant_db, user, "invoice", item.invoice_id)
+
+            created_summary.update(
+                {
+                    "clients": len(clients),
+                    "suppliers": len(suppliers),
+                    "products": len(products),
+                    "orders": len(orders),
+                    "invoices": len(invoices),
+                    "purchase_orders": len(purchase_orders),
+                    "purchase_invoices": len(purchase_invoices),
+                }
+            )
+
+        tenant_db.commit()
+        company.demo_initialized_at = datetime.now(timezone.utc)
+        company.demo_seeded = use_sample_data
+        public_db.commit()
+        public_db.refresh(company)
+        return created_summary
+    except HTTPException:
+        tenant_db.rollback()
+        public_db.rollback()
+        raise
+    except Exception as exc:
+        tenant_db.rollback()
+        public_db.rollback()
+        logger.exception("Demo initialization failed")
+        raise HTTPException(status_code=400, detail="No se pudo inicializar la demo.") from exc
+    finally:
+        tenant_db.close()
+
+
 async def generate_ai_response(context: str, user_message: str) -> str:
     if not openai_client:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -2048,6 +2464,7 @@ def execute_ai_write_action(action: Dict[str, Any], user: UserModel, db: Session
 
     if entity == "client":
         if intent == "create":
+            ensure_demo_capacity(db, user, "clients")
             if not data.get("name"):
                 return "Puedo crear el cliente, pero me falta al menos el nombre."
             item = ClientModel(
@@ -2078,6 +2495,7 @@ def execute_ai_write_action(action: Dict[str, Any], user: UserModel, db: Session
 
     if entity == "supplier":
         if intent == "create":
+            ensure_demo_capacity(db, user, "suppliers")
             if not data.get("name"):
                 return "Puedo crear el proveedor, pero me falta al menos el nombre."
             item = SupplierModel(
@@ -2108,6 +2526,7 @@ def execute_ai_write_action(action: Dict[str, Any], user: UserModel, db: Session
 
     if entity == "product":
         if intent == "create":
+            ensure_demo_capacity(db, user, "products")
             if not data.get("name") or not data.get("sku"):
                 return "Puedo crear el producto, pero me faltan al menos nombre y SKU."
             item = ProductModel(
@@ -2137,6 +2556,7 @@ def execute_ai_write_action(action: Dict[str, Any], user: UserModel, db: Session
 
     if entity == "warehouse":
         if intent == "create":
+            ensure_demo_initialized(user)
             if not data.get("name"):
                 return "Puedo crear el almacen, pero me falta al menos el nombre."
             item = WarehouseModel(
@@ -2481,6 +2901,9 @@ def register(data: RegisterInput, request: Request, response: Response, db: Sess
         raise HTTPException(status_code=400, detail="Email already registered")
     if not data.accept_terms or not data.accept_privacy:
         raise HTTPException(status_code=400, detail="Debes aceptar terminos y politica de privacidad")
+    account_mode = (data.account_mode or "standard").strip().lower()
+    if account_mode not in {"standard", DEMO_ACCOUNT_MODE}:
+        raise HTTPException(status_code=400, detail="Modo de cuenta no valido")
 
     seed_legal_documents(db)
     schema_name = slugify_schema_name(data.company_name)
@@ -2498,6 +2921,9 @@ def register(data: RegisterInput, request: Request, response: Response, db: Sess
         phone=data.company_phone.strip() if data.company_phone else None,
         email=data.company_email.lower() if data.company_email else None,
         billing_email=data.company_email.lower() if data.company_email else data.email.lower(),
+        account_mode=account_mode,
+        demo_record_limit=DEMO_RECORD_LIMIT_DEFAULT,
+        demo_expires_at=datetime.now(timezone.utc) + timedelta(days=DEMO_DURATION_DAYS) if account_mode == DEMO_ACCOUNT_MODE else None,
         fiscal_series_config={"default": {"series": "F", "next_number": 1}},
         verifactu_enabled=True,
         aeat_submission_enabled=False,
@@ -2577,6 +3003,8 @@ def login(data: LoginInput, response: Response, db: Session = Depends(get_public
     company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
     if not company:
         raise HTTPException(status_code=401, detail="Company not found")
+    if company.account_mode == DEMO_ACCOUNT_MODE and company.demo_expires_at and company.demo_expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=403, detail="La demo de esta empresa ha expirado. Mejora el plan para reactivarla.")
     setattr(user, "company_schema", company.schema_name)
     setattr(user, "company", company)
 
@@ -2602,6 +3030,26 @@ def get_me(request: Request, user: UserModel = Depends(get_current_user), db: Se
     data = serialize_user_for_request(user, request)
     data["pending_legal_documents"] = get_required_legal_reacceptances(db, user)
     return data
+
+
+@app.post("/api/demo/initialize")
+def initialize_demo(
+    data: DemoInitializationInput,
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_public_db),
+) -> Dict[str, Any]:
+    company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    setattr(user, "company", company)
+    summary = initialize_demo_company_data(db, user, use_sample_data=data.use_sample_data)
+    company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    setattr(user, "company", company)
+    return {
+        "message": "Demo inicializada correctamente",
+        "summary": summary,
+        "user": serialize_user(user),
+    }
 
 
 @app.post("/api/auth/logout")
@@ -2842,6 +3290,7 @@ def get_client(client_id: str, user: UserModel = Depends(get_current_user), db: 
 @app.post("/api/clients")
 def create_client(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "clients.write")
+    ensure_demo_capacity(db, user, "clients")
     item = ClientModel(
         client_id=prefixed_id("cli"),
         name=data["name"],
@@ -2874,6 +3323,7 @@ def update_client(client_id: str, data: Dict[str, Any], user: UserModel = Depend
 @app.delete("/api/clients/{client_id}")
 def delete_client(client_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "clients.write")
+    protect_demo_seed_delete(db, user, "client", client_id)
     company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == client_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -2919,6 +3369,7 @@ def get_supplier(supplier_id: str, user: UserModel = Depends(get_current_user), 
 @app.post("/api/suppliers")
 def create_supplier(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "suppliers.write")
+    ensure_demo_capacity(db, user, "suppliers")
     item = SupplierModel(
         supplier_id=prefixed_id("sup"),
         name=data["name"],
@@ -2951,6 +3402,7 @@ def update_supplier(supplier_id: str, data: Dict[str, Any], user: UserModel = De
 @app.delete("/api/suppliers/{supplier_id}")
 def delete_supplier(supplier_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "suppliers.write")
+    protect_demo_seed_delete(db, user, "supplier", supplier_id)
     company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == supplier_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -2997,6 +3449,7 @@ def get_product(product_id: str, user: UserModel = Depends(get_current_user), db
 @app.post("/api/products")
 def create_product(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "products.write")
+    ensure_demo_capacity(db, user, "products")
     item = ProductModel(
         product_id=prefixed_id("prod"),
         sku=data["sku"],
@@ -3028,6 +3481,7 @@ def update_product(product_id: str, data: Dict[str, Any], user: UserModel = Depe
 @app.delete("/api/products/{product_id}")
 def delete_product(product_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "products.write")
+    protect_demo_seed_delete(db, user, "product", product_id)
     company_filter(db.query(ProductModel), ProductModel, user).filter(ProductModel.product_id == product_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -3038,8 +3492,10 @@ async def import_products_csv(file: UploadFile = File(...), user: UserModel = De
     require_permission(user, "products.write")
     content = (await file.read()).decode("utf-8")
     reader = csv.DictReader(io.StringIO(content))
+    rows = list(reader)
+    ensure_demo_capacity(db, user, "products", extra_rows=len(rows))
     imported = 0
-    for row in reader:
+    for row in rows:
         db.add(
             ProductModel(
                 product_id=prefixed_id("prod"),
@@ -3065,6 +3521,7 @@ def get_warehouses(user: UserModel = Depends(get_current_user), db: Session = De
 @app.post("/api/warehouses")
 def create_warehouse(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "inventory.write")
+    ensure_demo_capacity(db, user, "inventory")
     item = WarehouseModel(warehouse_id=prefixed_id("wh"), name=data["name"], address=data.get("address"), company_id=user.company_id)
     db.add(item)
     db.commit()
@@ -3087,6 +3544,7 @@ def update_warehouse(warehouse_id: str, data: Dict[str, Any], user: UserModel = 
 @app.delete("/api/warehouses/{warehouse_id}")
 def delete_warehouse(warehouse_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "inventory.write")
+    protect_demo_seed_delete(db, user, "warehouse", warehouse_id)
     company_filter(db.query(WarehouseModel), WarehouseModel, user).filter(WarehouseModel.warehouse_id == warehouse_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -3104,6 +3562,7 @@ def get_inventory(warehouse_id: Optional[str] = None, user: UserModel = Depends(
 @app.post("/api/inventory")
 def create_inventory(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "inventory.write")
+    ensure_demo_initialized(user)
     existing = company_filter(db.query(InventoryModel), InventoryModel, user).filter(
         InventoryModel.product_id == data["product_id"],
         InventoryModel.warehouse_id == data["warehouse_id"],
@@ -3215,6 +3674,7 @@ def get_order(order_id: str, user: UserModel = Depends(get_current_user), db: Se
 @app.post("/api/orders")
 def create_order(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "sales.write")
+    ensure_demo_capacity(db, user, "orders")
     client = first_or_404(company_filter(db.query(ClientModel), ClientModel, user).filter(ClientModel.client_id == data["client_id"]), "Client not found")
     products_by_id = lookup_products(db, user, data.get("items", []))
     items, subtotal = build_line_items(data.get("items", []), products_by_id)
@@ -3255,6 +3715,7 @@ def update_order(order_id: str, data: Dict[str, Any], user: UserModel = Depends(
 @app.delete("/api/orders/{order_id}")
 def delete_order(order_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "sales.write")
+    protect_demo_seed_delete(db, user, "order", order_id)
     company_filter(db.query(OrderModel), OrderModel, user).filter(OrderModel.order_id == order_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -3315,6 +3776,7 @@ def get_invoice_pdf(invoice_id: str, user: UserModel = Depends(get_current_user)
 @app.post("/api/invoices")
 def create_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "sales.write")
+    ensure_demo_capacity(db, user, "invoices")
     source_order = None
     if data.get("order_id"):
         source_order = first_or_404(
@@ -3609,6 +4071,7 @@ def get_purchase_orders(user: UserModel = Depends(get_current_user), db: Session
 @app.post("/api/purchase-orders")
 def create_purchase_order(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "purchases.write")
+    ensure_demo_capacity(db, user, "purchase_orders")
     supplier = first_or_404(company_filter(db.query(SupplierModel), SupplierModel, user).filter(SupplierModel.supplier_id == data["supplier_id"]), "Supplier not found")
     products_by_id = lookup_products(db, user, data.get("items", []))
     items, subtotal = build_line_items(data.get("items", []), products_by_id)
@@ -3649,6 +4112,7 @@ def update_purchase_order(po_id: str, data: Dict[str, Any], user: UserModel = De
 @app.delete("/api/purchase-orders/{po_id}")
 def delete_purchase_order(po_id: str, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, str]:
     require_permission(user, "purchases.write")
+    protect_demo_seed_delete(db, user, "purchase_order", po_id)
     company_filter(db.query(PurchaseOrderModel), PurchaseOrderModel, user).filter(PurchaseOrderModel.po_id == po_id).delete()
     db.commit()
     return {"message": "Deleted"}
@@ -3664,6 +4128,7 @@ def get_purchase_invoices(user: UserModel = Depends(get_current_user), db: Sessi
 @app.post("/api/purchase-invoices")
 def create_purchase_invoice(data: Dict[str, Any], user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "purchases.write")
+    ensure_demo_capacity(db, user, "purchase_invoices")
     source_po = None
     if data.get("po_id"):
         source_po = first_or_404(
@@ -3742,6 +4207,7 @@ def get_returns(user: UserModel = Depends(get_current_user), db: Session = Depen
 
 @app.post("/api/returns")
 def create_return(data: ReturnInput, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
+    ensure_demo_initialized(user)
     return_type = data.return_type.strip().lower()
     if return_type == "sales":
         require_permission(user, "sales.write")
@@ -3790,6 +4256,7 @@ def get_stock_transfers(user: UserModel = Depends(get_current_user), db: Session
 @app.post("/api/stock-transfers")
 def create_stock_transfer(data: StockTransferInput, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)) -> Dict[str, Any]:
     require_permission(user, "inventory.write")
+    ensure_demo_initialized(user)
     if data.source_warehouse_id == data.target_warehouse_id:
         raise HTTPException(status_code=400, detail="Source and target warehouse must be different")
     if not data.items:
