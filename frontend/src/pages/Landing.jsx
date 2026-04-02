@@ -15,6 +15,7 @@ import LegalFooter from "@/components/layout/LegalFooter";
 import LegalDocumentLink from "@/components/legal/LegalDocumentLink";
 
 const API = API_BASE;
+const PORTAL_BASE_URL = process.env.REACT_APP_PORTAL_URL || "https://www.starxia.com";
 
 const initialLogin = { email: "", password: "" };
 const initialRegister = {
@@ -86,6 +87,17 @@ const Landing = () => {
     : "border-zinc-300 bg-white text-zinc-900 placeholder:text-zinc-500 caret-primary";
 
   const hasResetToken = useMemo(() => Boolean(resetToken), [resetToken]);
+  const loginPortalUrl = useMemo(() => {
+    const url = new URL("/iniciar-sesion", PORTAL_BASE_URL);
+    url.searchParams.set("product", "erp-standard");
+    return url.toString();
+  }, []);
+  const registerPortalUrl = useMemo(() => {
+    const url = new URL("/registro", PORTAL_BASE_URL);
+    url.searchParams.set("product", "erp-standard");
+    url.searchParams.set("mode", demoModeRequested ? "demo" : "buy");
+    return url.toString();
+  }, [demoModeRequested]);
 
   useEffect(() => {
     if (user && !hasResetToken) {
@@ -286,201 +298,35 @@ const Landing = () => {
                   </Button>
                 </form>
               ) : (
-                <Tabs defaultValue={demoModeRequested ? "register" : "login"} className="space-y-6">
-                  <TabsList className="grid w-full grid-cols-2">
-                    <TabsTrigger value="login">Iniciar sesion</TabsTrigger>
-                    <TabsTrigger value="register">Crear cuenta</TabsTrigger>
-                  </TabsList>
+                <div className="space-y-5">
+                  <div className={`rounded-xl border p-4 text-sm ${isDark ? "border-primary/30 bg-primary/10 text-zinc-100" : "border-primary/20 bg-primary/10 text-zinc-900"}`}>
+                    El acceso principal y la activacion de productos ahora se gestionan desde <strong>Starxia</strong>.
+                    {demoModeRequested ? " Tu cuenta se preparara para activar la demo del ERP administrativo." : " Desde alli podras iniciar sesion, activar tu plan y entrar despues al ERP."}
+                  </div>
 
-                  <TabsContent value="login" className="space-y-6">
-                    <form className="space-y-4" onSubmit={handleLogin}>
-                      <div className="space-y-2">
-                        <Label htmlFor="login-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Email</Label>
-                        <Input
-                          id="login-email"
-                          type="email"
-                          value={loginForm.email}
-                          onChange={(event) => setLoginForm({ ...loginForm, email: event.target.value })}
-                          placeholder="admin@tuempresa.com"
-                          className={authInputClassName}
-                          required
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="login-password" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Contrasena</Label>
-                        <Input
-                          id="login-password"
-                          type="password"
-                          value={loginForm.password}
-                          onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })}
-                          placeholder="Tu contrasena"
-                          className={authInputClassName}
-                          required
-                        />
-                      </div>
-                      <Button className="w-full" type="submit" disabled={submitting}>
-                        {submitting ? "Entrando..." : "Entrar al ERP"}
+                  <div className="grid gap-3">
+                    <a href={loginPortalUrl} className="block">
+                      <Button className="w-full" type="button">
+                        Iniciar sesion en Starxia
                       </Button>
-                    </form>
+                    </a>
+                    <a href={registerPortalUrl} className="block">
+                      <Button variant="secondary" className="w-full" type="button">
+                        {demoModeRequested ? "Crear cuenta y comenzar demo" : "Crear cuenta en Starxia"}
+                      </Button>
+                    </a>
+                  </div>
 
-                    <div className={`rounded-xl border p-4 ${isDark ? "border-white/10 bg-white/5" : "border-zinc-200 bg-zinc-50"}`}>
-                      <div className={`mb-3 flex items-center gap-2 text-sm font-medium ${isDark ? "text-white" : "text-zinc-900"}`}>
-                        <KeyRound className="h-4 w-4 text-primary" />
-                        Olvide mi contrasena
-                      </div>
-                      <form className="space-y-3" onSubmit={handleForgotPassword}>
-                        <Input
-                          type="email"
-                          value={forgotPasswordForm.email}
-                          onChange={(event) => setForgotPasswordForm({ email: event.target.value })}
-                          placeholder="Tu email de acceso"
-                          className={authInputClassName}
-                          required
-                        />
-                        <Button type="submit" variant="secondary" className="w-full" disabled={requestingReset}>
-                          {requestingReset ? "Enviando..." : "Enviar enlace de recuperacion"}
-                        </Button>
-                      </form>
+                  <div className={`rounded-xl border p-4 text-sm ${isDark ? "border-white/10 bg-white/5 text-zinc-300" : "border-zinc-200 bg-zinc-50 text-zinc-700"}`}>
+                    <div className={`mb-2 flex items-center gap-2 text-sm font-medium ${isDark ? "text-white" : "text-zinc-900"}`}>
+                      <KeyRound className="h-4 w-4 text-primary" />
+                      Acceso centralizado
                     </div>
-                  </TabsContent>
-
-                  <TabsContent value="register">
-                    <form className="space-y-4" onSubmit={handleRegister}>
-                      {demoModeRequested && (
-                        <div className={`rounded-xl border p-4 text-sm ${isDark ? "border-primary/30 bg-primary/10 text-zinc-100" : "border-primary/20 bg-primary/10 text-zinc-900"}`}>
-                          Estas creando una <strong>cuenta DEMO de 7 dias</strong>. Al entrar podras elegir si quieres datos de ejemplo o empezar en blanco.
-                        </div>
-                      )}
-                      <div className="space-y-2">
-                        <Label htmlFor="register-company" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Empresa</Label>
-                        <Input
-                          id="register-company"
-                          value={registerForm.company_name}
-                          onChange={(event) => setRegisterForm({ ...registerForm, company_name: event.target.value })}
-                          placeholder="Starxia Operations"
-                          className={authInputClassName}
-                          required
-                        />
-                      </div>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <div className="space-y-2">
-                          <Label htmlFor="register-company-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Email de empresa</Label>
-                          <Input
-                            id="register-company-email"
-                            type="email"
-                            value={registerForm.company_email}
-                            onChange={(event) => setRegisterForm({ ...registerForm, company_email: event.target.value })}
-                            placeholder="info@tuempresa.com"
-                            className={authInputClassName}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="register-company-phone" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Telefono de empresa</Label>
-                          <Input
-                            id="register-company-phone"
-                            value={registerForm.company_phone}
-                            onChange={(event) => setRegisterForm({ ...registerForm, company_phone: event.target.value })}
-                            placeholder="+34 600 000 000"
-                            className={authInputClassName}
-                          />
-                        </div>
-                      </div>
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <div className="space-y-2">
-                          <Label htmlFor="register-company-tax-id" className={isDark ? "text-zinc-200" : "text-zinc-700"}>NIF/CIF</Label>
-                          <Input
-                            id="register-company-tax-id"
-                            value={registerForm.company_tax_id}
-                            onChange={(event) => setRegisterForm({ ...registerForm, company_tax_id: event.target.value })}
-                            placeholder="B12345678"
-                            className={authInputClassName}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="register-name" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Nombre del admin</Label>
-                          <Input
-                            id="register-name"
-                            value={registerForm.name}
-                            onChange={(event) => setRegisterForm({ ...registerForm, name: event.target.value })}
-                            placeholder="Tu nombre"
-                            className={authInputClassName}
-                            required
-                          />
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="register-company-address" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Direccion</Label>
-                        <Input
-                          id="register-company-address"
-                          value={registerForm.company_address}
-                          onChange={(event) => setRegisterForm({ ...registerForm, company_address: event.target.value })}
-                          placeholder="Calle, ciudad y provincia"
-                          className={authInputClassName}
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="register-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Email de acceso</Label>
-                        <Input
-                          id="register-email"
-                          type="email"
-                          value={registerForm.email}
-                          onChange={(event) => setRegisterForm({ ...registerForm, email: event.target.value })}
-                          placeholder="admin@tuempresa.com"
-                          className={authInputClassName}
-                          required
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="register-password" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Contrasena</Label>
-                        <Input
-                          id="register-password"
-                          type="password"
-                          minLength={8}
-                          value={registerForm.password}
-                          onChange={(event) => setRegisterForm({ ...registerForm, password: event.target.value })}
-                          placeholder="Minimo 8 caracteres"
-                          className={authInputClassName}
-                          required
-                        />
-                      </div>
-                      <div
-                        className={`space-y-3 rounded-xl border p-4 text-sm ${
-                          isDark ? "border-white/10 bg-white/5 text-zinc-300" : "border-zinc-200 bg-zinc-50 text-zinc-700"
-                        }`}
-                      >
-                        <label className="flex items-start gap-3">
-                          <input
-                            type="checkbox"
-                            checked={consents.terms}
-                            onChange={(event) => setConsents((current) => ({ ...current, terms: event.target.checked }))}
-                            className="mt-1"
-                          />
-                          <span>
-                            Acepto los{" "}
-                            <LegalDocumentLink code="terms" label="terminos y condiciones" className="inline text-primary underline" />{" "}
-                            vigentes {versionFor("terms", legalDocuments)}.
-                          </span>
-                        </label>
-                        <label className="flex items-start gap-3">
-                          <input
-                            type="checkbox"
-                            checked={consents.privacy}
-                            onChange={(event) => setConsents((current) => ({ ...current, privacy: event.target.checked }))}
-                            className="mt-1"
-                          />
-                          <span>
-                            Acepto la{" "}
-                            <LegalDocumentLink code="privacy" label="politica de privacidad" className="inline text-primary underline" />{" "}
-                            vigente {versionFor("privacy", legalDocuments)}.
-                          </span>
-                        </label>
-                      </div>
-                      <Button className="w-full" type="submit" disabled={submitting}>
-                        {submitting ? "Creando..." : demoModeRequested ? "Crear demo y acceder" : "Crear empresa y acceder"}
-                      </Button>
-                    </form>
-                  </TabsContent>
-                </Tabs>
+                    <p>
+                      Una sola cuenta para Starxia, ERP administrativo y futuros productos. Cuando actives el plan, entraras al ERP sin volver a registrarte.
+                    </p>
+                  </div>
+                </div>
               )}
             </CardContent>
           </Card>

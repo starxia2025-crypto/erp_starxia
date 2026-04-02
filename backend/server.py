@@ -41,6 +41,7 @@ USER_PICTURES_DIR.mkdir(exist_ok=True)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 JWT_SECRET = os.environ["JWT_SECRET"]
+SSO_SHARED_SECRET = os.environ.get("SSO_SHARED_SECRET", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 PASSWORD_RESET_BASE_URL = os.environ.get("PASSWORD_RESET_BASE_URL", "http://localhost:3000")
@@ -60,6 +61,7 @@ CORS_ORIGINS = [
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax").lower()
 ACCESS_TOKEN_EXPIRE_DAYS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_DAYS", "7"))
+APP_BASE_URL = os.environ.get("APP_BASE_URL") or (CORS_ORIGINS[0] if CORS_ORIGINS else "http://localhost:3000")
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True, connect_args=connect_args)
@@ -1333,6 +1335,18 @@ def set_auth_cookie(response: Response, token: str) -> None:
         max_age=ACCESS_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
         path="/",
     )
+
+
+def decode_sso_token(token: str) -> Dict[str, Any]:
+    if not SSO_SHARED_SECRET:
+        raise HTTPException(status_code=503, detail="SSO is not configured")
+    try:
+        payload = jwt.decode(token, SSO_SHARED_SECRET, algorithms=["HS256"])
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid SSO token") from exc
+    if payload.get("productKey") not in {"erp-standard", "erp-dental"}:
+        raise HTTPException(status_code=403, detail="This product cannot access this ERP")
+    return payload
 
 
 def create_password_reset_token(user: UserModel) -> str:
@@ -3065,6 +3079,87 @@ def logout(response: Response, user: UserModel = Depends(get_current_user), db: 
     db.commit()
     response.delete_cookie("session_token", path="/")
     return {"message": "Logged out"}
+
+
+@app.get("/api/sso/consume")
+def consume_sso(token: str, db: Session = Depends(get_public_db)) -> Response:
+    payload = decode_sso_token(token)
+    email = str(payload.get("email", "")).strip().lower()
+    full_name = str(payload.get("fullName", "")).strip() or "Usuario Starxia"
+    business_name = str(payload.get("businessName", "")).strip() or f"{full_name.split(' ')[0]} ERP"
+    avatar_url = payload.get("avatarUrl")
+    access_mode = "demo" if payload.get("accessMode") == "demo" else "standard"
+    trial_ends_at = parse_iso_datetime(payload.get("trialEndsAt"))
+
+    if not email:
+        raise HTTPException(status_code=400, detail="SSO payload is missing email")
+
+    user = db.query(UserModel).filter(UserModel.email == email).first()
+    company: Optional[CompanyModel] = None
+
+    if user:
+        company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    else:
+        schema_name = slugify_schema_name(business_name)
+        ensure_schema_exists(schema_name)
+        company = CompanyModel(
+            company_id=prefixed_id("comp"),
+            schema_name=schema_name,
+            name=business_name,
+            legal_name=business_name,
+            billing_email=email,
+            account_mode=access_mode,
+            demo_record_limit=DEMO_RECORD_LIMIT_DEFAULT,
+            demo_expires_at=trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None,
+            fiscal_series_config={"default": {"series": "F", "next_number": 1}},
+            verifactu_enabled=True,
+            aeat_submission_enabled=False,
+        )
+        user = UserModel(
+            user_id=prefixed_id("user"),
+            email=email,
+            password_hash=hash_password(uuid.uuid4().hex),
+            name=full_name,
+            picture=avatar_url,
+            role="admin",
+            company_id=company.company_id,
+        )
+        db.add(company)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        tenant_db = TenantSessionLocal(bind=get_tenant_bind(schema_name))
+        try:
+            apply_tenant_migrations(schema_name)
+            warehouse = WarehouseModel(
+                warehouse_id=prefixed_id("wh"),
+                name="Almacen Principal",
+                company_id=company.company_id,
+            )
+            tenant_db.add(warehouse)
+            tenant_db.commit()
+        finally:
+            tenant_db.close()
+
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found for SSO user")
+
+    company.account_mode = access_mode
+    company.demo_expires_at = trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None
+    if avatar_url and not user.picture:
+        user.picture = avatar_url
+    if full_name and user.name != full_name:
+        user.name = full_name
+    db.commit()
+
+    setattr(user, "company_schema", company.schema_name)
+    setattr(user, "company", company)
+
+    response = Response(status_code=307)
+    set_auth_cookie(response, create_access_token(user))
+    response.headers["Location"] = f"{APP_BASE_URL.rstrip('/')}/dashboard"
+    return response
 
 
 @app.post("/api/auth/forgot-password")
