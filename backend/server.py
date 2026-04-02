@@ -13,6 +13,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest, urlopen
  
 import pandas as pd
 from compliance_services import build_verifactu_export, get_aeat_adapter
@@ -62,6 +63,8 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
 COOKIE_SAMESITE = os.environ.get("COOKIE_SAMESITE", "lax").lower()
 ACCESS_TOKEN_EXPIRE_DAYS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_DAYS", "7"))
 APP_BASE_URL = os.environ.get("APP_BASE_URL") or (CORS_ORIGINS[0] if CORS_ORIGINS else "http://localhost:3000")
+PORTAL_API_BASE_URL = os.environ.get("PORTAL_API_BASE_URL", "").rstrip("/")
+PORTAL_SYNC_INTERVAL_SECONDS = int(os.environ.get("PORTAL_SYNC_INTERVAL_SECONDS", "300"))
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True, connect_args=connect_args)
@@ -111,6 +114,9 @@ class CompanyModel(PublicBase, TimestampMixin):
     demo_seeded = mapped_column(Boolean, default=False, nullable=False)
     demo_record_limit = mapped_column(Integer, default=20, nullable=False)
     demo_expires_at = mapped_column(DateTime(timezone=True))
+    portal_user_id = mapped_column(String(64))
+    portal_product_key = mapped_column(String(64))
+    portal_last_synced_at = mapped_column(DateTime(timezone=True))
 
 
 class LegalDocumentModel(PublicBase, TimestampMixin):
@@ -1092,6 +1098,68 @@ def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     return parsed
 
 
+def should_sync_company_access(company: CompanyModel) -> bool:
+    if not PORTAL_API_BASE_URL or not SSO_SHARED_SECRET:
+        return False
+    if not company.portal_user_id or not company.portal_product_key:
+        return False
+    if not company.portal_last_synced_at:
+        return True
+    return company.portal_last_synced_at <= datetime.now(timezone.utc) - timedelta(seconds=PORTAL_SYNC_INTERVAL_SECONDS)
+
+
+def portal_status_message(status: str) -> str:
+    messages = {
+        "expired": "La demo de esta empresa ha expirado. Mejora el plan para seguir usando el ERP.",
+        "cancelled": "Este plan ha sido cancelado desde el portal central.",
+        "past_due": "Este plan tiene un pago pendiente. Regularizalo en el portal central para seguir usando el ERP.",
+        "pending": "El pago del plan aun esta en proceso. Vuelve a intentarlo en unos instantes.",
+        "not_found": "Este producto no esta activo en el portal central.",
+    }
+    return messages.get(status, "Este producto no tiene acceso activo en el portal central.")
+
+
+def sync_company_access_from_portal(db: Session, company: CompanyModel) -> CompanyModel:
+    if not should_sync_company_access(company):
+        return company
+
+    try:
+        query = urlencode(
+            {
+                "portalUserId": company.portal_user_id,
+                "productKey": company.portal_product_key,
+            }
+        )
+        request = UrlRequest(
+            f"{PORTAL_API_BASE_URL}/api/sso/status?{query}",
+            headers={
+                "Accept": "application/json",
+                "x-sso-secret": SSO_SHARED_SECRET,
+            },
+        )
+        with urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        logger.warning("Could not sync company access from Starxia portal: %s", exc)
+        return company
+
+    company.portal_last_synced_at = datetime.now(timezone.utc)
+    status = (payload.get("status") or "not_found").strip().lower()
+    access_mode = (payload.get("accessMode") or "production").strip().lower()
+    trial_ends_at = parse_iso_datetime(payload.get("trialEndsAt"))
+
+    company.account_mode = DEMO_ACCOUNT_MODE if access_mode == DEMO_ACCOUNT_MODE else "standard"
+    company.demo_expires_at = trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None
+    db.add(company)
+    db.commit()
+    db.refresh(company)
+
+    if not payload.get("allowed"):
+        raise HTTPException(status_code=403, detail=portal_status_message(status))
+
+    return company
+
+
 def canonical_json(data: Dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
@@ -1136,6 +1204,9 @@ def apply_public_migrations() -> None:
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS demo_seeded BOOLEAN NOT NULL DEFAULT FALSE",
         f"ALTER TABLE companies ADD COLUMN IF NOT EXISTS demo_record_limit INTEGER NOT NULL DEFAULT {DEMO_RECORD_LIMIT_DEFAULT}",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS demo_expires_at TIMESTAMPTZ",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS portal_user_id VARCHAR(64)",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS portal_product_key VARCHAR(64)",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS portal_last_synced_at TIMESTAMPTZ",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS fiscal_series_config JSONB NOT NULL DEFAULT '{}'::jsonb",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS verifactu_enabled BOOLEAN NOT NULL DEFAULT TRUE",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS aeat_submission_enabled BOOLEAN NOT NULL DEFAULT FALSE",
@@ -1472,6 +1543,7 @@ def get_current_user(
     company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
     if not company:
         raise HTTPException(status_code=401, detail="Company not found")
+    company = sync_company_access_from_portal(db, company)
     if company.account_mode == DEMO_ACCOUNT_MODE and company.demo_expires_at and company.demo_expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=403, detail="La demo de esta empresa ha expirado. Mejora el plan para seguir usando el ERP.")
     setattr(user, "company_schema", company.schema_name)
@@ -3017,6 +3089,7 @@ def login(data: LoginInput, response: Response, db: Session = Depends(get_public
     company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
     if not company:
         raise HTTPException(status_code=401, detail="Company not found")
+    company = sync_company_access_from_portal(db, company)
     if company.account_mode == DEMO_ACCOUNT_MODE and company.demo_expires_at and company.demo_expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=403, detail="La demo de esta empresa ha expirado. Mejora el plan para reactivarla.")
     setattr(user, "company_schema", company.schema_name)
@@ -3090,6 +3163,8 @@ def consume_sso(token: str, db: Session = Depends(get_public_db)) -> Response:
     avatar_url = payload.get("avatarUrl")
     access_mode = "demo" if payload.get("accessMode") == "demo" else "standard"
     trial_ends_at = parse_iso_datetime(payload.get("trialEndsAt"))
+    portal_user_id = str(payload.get("portalUserId", "")).strip()
+    portal_product_key = str(payload.get("productKey", "")).strip()
 
     if not email:
         raise HTTPException(status_code=400, detail="SSO payload is missing email")
@@ -3111,6 +3186,9 @@ def consume_sso(token: str, db: Session = Depends(get_public_db)) -> Response:
             account_mode=access_mode,
             demo_record_limit=DEMO_RECORD_LIMIT_DEFAULT,
             demo_expires_at=trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None,
+            portal_user_id=portal_user_id or None,
+            portal_product_key=portal_product_key or None,
+            portal_last_synced_at=datetime.now(timezone.utc),
             fiscal_series_config={"default": {"series": "F", "next_number": 1}},
             verifactu_enabled=True,
             aeat_submission_enabled=False,
@@ -3147,6 +3225,9 @@ def consume_sso(token: str, db: Session = Depends(get_public_db)) -> Response:
 
     company.account_mode = access_mode
     company.demo_expires_at = trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None
+    company.portal_user_id = portal_user_id or company.portal_user_id
+    company.portal_product_key = portal_product_key or company.portal_product_key
+    company.portal_last_synced_at = datetime.now(timezone.utc)
     if avatar_url and not user.picture:
         user.picture = avatar_url
     if full_name and user.name != full_name:
