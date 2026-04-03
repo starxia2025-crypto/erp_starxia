@@ -16,6 +16,7 @@ import LegalDocumentLink from "@/components/legal/LegalDocumentLink";
 
 const API = API_BASE;
 const PORTAL_BASE_URL = process.env.REACT_APP_PORTAL_URL || "https://www.starxia.com";
+const USE_PORTAL_AUTH = process.env.REACT_APP_USE_PORTAL_AUTH === "true";
 
 const initialLogin = { email: "", password: "" };
 const initialRegister = {
@@ -253,7 +254,9 @@ const Landing = () => {
               <CardDescription>
                 {hasResetToken
                   ? "Define una nueva contrasena para tu usuario."
-                  : "Entra con tu cuenta o crea la primera empresa administradora."}
+                  : USE_PORTAL_AUTH
+                    ? "Acceso centralizado de Starxia para auth y activacion."
+                    : "Entra con tu cuenta o crea la primera empresa administradora."}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -297,7 +300,7 @@ const Landing = () => {
                     Volver al acceso
                   </Button>
                 </form>
-              ) : (
+              ) : USE_PORTAL_AUTH ? (
                 <div className="space-y-5">
                   <div className={`rounded-xl border p-4 text-sm ${isDark ? "border-primary/30 bg-primary/10 text-zinc-100" : "border-primary/20 bg-primary/10 text-zinc-900"}`}>
                     El acceso principal y la activacion de productos ahora se gestionan desde <strong>Starxia</strong>.
@@ -327,6 +330,145 @@ const Landing = () => {
                     </p>
                   </div>
                 </div>
+              ) : (
+                <Tabs defaultValue={demoModeRequested ? "register" : "login"} className="space-y-4">
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="login">Iniciar sesion</TabsTrigger>
+                    <TabsTrigger value="register">Crear empresa</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="login">
+                    <form className="space-y-4" onSubmit={handleLogin}>
+                      <div className="space-y-2">
+                        <Label htmlFor="login-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Email</Label>
+                        <Input
+                          id="login-email"
+                          type="email"
+                          value={loginForm.email}
+                          onChange={(event) => setLoginForm({ ...loginForm, email: event.target.value })}
+                          placeholder="tu@email.com"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="login-password" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Contrasena</Label>
+                        <Input
+                          id="login-password"
+                          type="password"
+                          minLength={8}
+                          value={loginForm.password}
+                          onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })}
+                          placeholder="Minimo 8 caracteres"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <Button className="w-full" type="submit" disabled={submitting}>
+                        {submitting ? "Entrando..." : "Entrar al ERP"}
+                      </Button>
+                    </form>
+
+                    <form className="mt-4 space-y-3" onSubmit={handleForgotPassword}>
+                      <div className="space-y-2">
+                        <Label htmlFor="forgot-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Olvide mi contrasena</Label>
+                        <Input
+                          id="forgot-email"
+                          type="email"
+                          value={forgotPasswordForm.email}
+                          onChange={(event) => setForgotPasswordForm({ email: event.target.value })}
+                          placeholder="tu@email.com"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <Button className="w-full" type="submit" variant="secondary" disabled={requestingReset}>
+                        {requestingReset ? "Enviando..." : "Enviar enlace de recuperacion"}
+                      </Button>
+                    </form>
+                  </TabsContent>
+
+                  <TabsContent value="register">
+                    <form className="space-y-4" onSubmit={handleRegister}>
+                      <div className="space-y-2">
+                        <Label htmlFor="register-name" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Nombre</Label>
+                        <Input
+                          id="register-name"
+                          value={registerForm.name}
+                          onChange={(event) => setRegisterForm({ ...registerForm, name: event.target.value })}
+                          placeholder="Nombre y apellidos"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="register-email" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Email</Label>
+                        <Input
+                          id="register-email"
+                          type="email"
+                          value={registerForm.email}
+                          onChange={(event) => setRegisterForm({ ...registerForm, email: event.target.value })}
+                          placeholder="tu@email.com"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="register-password" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Contrasena</Label>
+                        <Input
+                          id="register-password"
+                          type="password"
+                          minLength={8}
+                          value={registerForm.password}
+                          onChange={(event) => setRegisterForm({ ...registerForm, password: event.target.value })}
+                          placeholder="Minimo 8 caracteres"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="company-name" className={isDark ? "text-zinc-200" : "text-zinc-700"}>Nombre de empresa</Label>
+                        <Input
+                          id="company-name"
+                          value={registerForm.company_name}
+                          onChange={(event) => setRegisterForm({ ...registerForm, company_name: event.target.value })}
+                          placeholder="Ej: Farmacia Rondilla"
+                          className={authInputClassName}
+                          required
+                        />
+                      </div>
+
+                      <div className="space-y-3 rounded-xl border border-border/70 p-3">
+                        <label className={`flex items-start gap-2 text-sm ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>
+                          <input
+                            type="checkbox"
+                            checked={consents.terms}
+                            onChange={(event) => setConsents({ ...consents, terms: event.target.checked })}
+                            className="mt-1"
+                          />
+                          <span>
+                            Acepto los terminos y condiciones <LegalDocumentLink code="terms" documents={legalDocuments} showVersion /> {versionFor("terms", legalDocuments)}
+                          </span>
+                        </label>
+                        <label className={`flex items-start gap-2 text-sm ${isDark ? "text-zinc-300" : "text-zinc-700"}`}>
+                          <input
+                            type="checkbox"
+                            checked={consents.privacy}
+                            onChange={(event) => setConsents({ ...consents, privacy: event.target.checked })}
+                            className="mt-1"
+                          />
+                          <span>
+                            Acepto la politica de privacidad <LegalDocumentLink code="privacy" documents={legalDocuments} showVersion /> {versionFor("privacy", legalDocuments)}
+                          </span>
+                        </label>
+                      </div>
+
+                      <Button className="w-full" type="submit" disabled={submitting}>
+                        {submitting ? "Creando..." : demoModeRequested ? "Crear demo y acceder" : "Crear empresa y acceder"}
+                      </Button>
+                    </form>
+                  </TabsContent>
+                </Tabs>
               )}
             </CardContent>
           </Card>
