@@ -135,6 +135,7 @@ const Settings = () => {
   const [savingCompany, setSavingCompany] = useState(false);
   const [savingEmployee, setSavingEmployee] = useState(false);
   const [updatingUserId, setUpdatingUserId] = useState(null);
+  const [openingBillingPortal, setOpeningBillingPortal] = useState(false);
   const [uploadingCompanyLogo, setUploadingCompanyLogo] = useState(false);
   const [uploadingProfilePicture, setUploadingProfilePicture] = useState(false);
   const [profileCropOpen, setProfileCropOpen] = useState(false);
@@ -458,6 +459,18 @@ const Settings = () => {
     }
   };
 
+  const handleOpenBillingPortal = async () => {
+    setOpeningBillingPortal(true);
+    try {
+      const response = await axios.post(`${API}/billing/customer-portal`, {}, { withCredentials: true });
+      window.location.assign(response.data.url);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "No se pudo abrir el portal de pagos");
+    } finally {
+      setOpeningBillingPortal(false);
+    }
+  };
+
   const handleLegalDocumentPublish = async (event) => {
     event.preventDefault();
     if (!canEditCompany) return;
@@ -710,6 +723,25 @@ const Settings = () => {
                         />
                         Remision AEAT preparada
                       </label>
+                    </div>
+                    <div className="space-y-3 rounded-lg border border-border p-4 md:col-span-2">
+                      <Label className="text-sm font-medium">Suscripcion y cobros</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Abre el portal de Stripe para revisar la suscripcion, actualizar el metodo de pago o cancelar en modo test.
+                      </p>
+                      <div className="flex flex-wrap gap-3">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={handleOpenBillingPortal}
+                          disabled={openingBillingPortal || !company?.stripe_customer_id}
+                        >
+                          {openingBillingPortal ? "Abriendo portal..." : "Gestionar suscripcion en Stripe"}
+                        </Button>
+                        <span className="self-center text-xs text-muted-foreground">
+                          Disponible cuando la empresa ya tiene cliente Stripe asociado.
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </TabsContent>

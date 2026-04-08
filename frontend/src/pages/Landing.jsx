@@ -17,6 +17,7 @@ import LegalDocumentLink from "@/components/legal/LegalDocumentLink";
 const API = API_BASE;
 const PORTAL_BASE_URL = process.env.REACT_APP_PORTAL_URL || "https://www.starxia.com";
 const USE_PORTAL_AUTH = process.env.REACT_APP_USE_PORTAL_AUTH === "true";
+const STRIPE_TEST_PLAN_LABEL = "29 EUR/mes";
 
 const initialLogin = { email: "", password: "" };
 const initialRegister = {
@@ -80,6 +81,7 @@ const Landing = () => {
   const [submitting, setSubmitting] = useState(false);
   const [requestingReset, setRequestingReset] = useState(false);
   const [resettingPassword, setResettingPassword] = useState(false);
+  const [completingCheckout, setCompletingCheckout] = useState(false);
   const [consents, setConsents] = useState(initialConsents);
   const [legalDocuments, setLegalDocuments] = useState([]);
   const isDark = theme === "dark";
@@ -88,6 +90,8 @@ const Landing = () => {
     : "border-zinc-300 bg-white text-zinc-900 placeholder:text-zinc-500 caret-primary";
 
   const hasResetToken = useMemo(() => Boolean(resetToken), [resetToken]);
+  const checkoutStatus = (searchParams.get("checkout") || "").toLowerCase();
+  const checkoutSessionId = searchParams.get("session_id") || "";
   const loginPortalUrl = useMemo(() => {
     const url = new URL("/iniciar-sesion", PORTAL_BASE_URL);
     url.searchParams.set("product", "erp-standard");
@@ -117,6 +121,48 @@ const Landing = () => {
     };
     loadLegalDocuments();
   }, []);
+
+  useEffect(() => {
+    if (checkoutStatus !== "success" || !checkoutSessionId || user) {
+      return;
+    }
+
+    let cancelled = false;
+    const completeStripeCheckout = async () => {
+      setCompletingCheckout(true);
+      try {
+        const response = await axios.post(
+          `${API}/billing/checkout-session/complete`,
+          { session_id: checkoutSessionId },
+          { withCredentials: true }
+        );
+        if (cancelled) return;
+        setUser(response.data);
+        toast.success("Pago de prueba confirmado. Tu empresa ya esta activa.");
+        setSearchParams({});
+        navigate("/dashboard");
+      } catch (error) {
+        if (cancelled) return;
+        toast.error(error.response?.data?.detail || "No se pudo confirmar el checkout de Stripe");
+      } finally {
+        if (!cancelled) {
+          setCompletingCheckout(false);
+        }
+      }
+    };
+
+    completeStripeCheckout();
+    return () => {
+      cancelled = true;
+    };
+  }, [checkoutSessionId, checkoutStatus, navigate, setSearchParams, setUser, user]);
+
+  useEffect(() => {
+    if (checkoutStatus === "cancelled") {
+      toast.error("Has cancelado el checkout de Stripe. Tu cuenta aun no se ha activado.");
+      setSearchParams({});
+    }
+  }, [checkoutStatus, setSearchParams]);
 
   const handleLogin = async (event) => {
     event.preventDefault();
@@ -150,9 +196,14 @@ const Landing = () => {
         accept_terms: consents.terms,
         accept_privacy: consents.privacy,
       };
-      const response = await axios.post(`${API}/auth/register`, payload, { withCredentials: true });
-      setUser(response.data);
-      navigate("/dashboard");
+      if (demoModeRequested) {
+        const response = await axios.post(`${API}/auth/register`, payload, { withCredentials: true });
+        setUser(response.data);
+        navigate("/dashboard");
+      } else {
+        const response = await axios.post(`${API}/billing/checkout-session`, payload, { withCredentials: true });
+        window.location.assign(response.data.url);
+      }
     } catch (error) {
       toast.error(error.response?.data?.detail || "No se pudo crear la cuenta");
     } finally {
@@ -463,8 +514,26 @@ const Landing = () => {
                         </label>
                       </div>
 
-                      <Button className="w-full" type="submit" disabled={submitting}>
-                        {submitting ? "Creando..." : demoModeRequested ? "Crear demo y acceder" : "Crear empresa y acceder"}
+                      {!demoModeRequested && (
+                        <div className={`rounded-xl border p-4 text-sm ${isDark ? "border-primary/30 bg-primary/10 text-zinc-100" : "border-primary/20 bg-primary/10 text-zinc-900"}`}>
+                          <p className="font-medium">Plan estandar en modo test</p>
+                          <p className="mt-1">
+                            Al continuar te llevaremos a Stripe Checkout para activar la suscripcion de prueba del ERP.
+                          </p>
+                          <p className="mt-2 text-xs opacity-80">
+                            Precio configurado para pruebas: {STRIPE_TEST_PLAN_LABEL}
+                          </p>
+                        </div>
+                      )}
+
+                      <Button className="w-full" type="submit" disabled={submitting || completingCheckout}>
+                        {submitting
+                          ? "Preparando..."
+                          : completingCheckout
+                            ? "Confirmando pago..."
+                            : demoModeRequested
+                              ? "Crear demo y acceder"
+                              : "Continuar al pago seguro"}
                       </Button>
                     </form>
                   </TabsContent>

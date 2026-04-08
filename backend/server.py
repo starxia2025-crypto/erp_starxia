@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from urllib.request import Request as UrlRequest, urlopen
  
 import pandas as pd
+import stripe
 from compliance_services import build_verifactu_export, get_aeat_adapter
 from dotenv import load_dotenv
 from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
@@ -65,6 +66,11 @@ ACCESS_TOKEN_EXPIRE_DAYS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_DAYS", "7"))
 APP_BASE_URL = os.environ.get("APP_BASE_URL") or (CORS_ORIGINS[0] if CORS_ORIGINS else "http://localhost:3000")
 PORTAL_API_BASE_URL = os.environ.get("PORTAL_API_BASE_URL", "").rstrip("/")
 PORTAL_SYNC_INTERVAL_SECONDS = int(os.environ.get("PORTAL_SYNC_INTERVAL_SECONDS", "300"))
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "").strip()
+STRIPE_DEFAULT_PRODUCT_KEY = os.environ.get("STRIPE_DEFAULT_PRODUCT_KEY", "erp-standard").strip() or "erp-standard"
+STRIPE_API_VERSION = "2026-02-25.clover"
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True, connect_args=connect_args)
@@ -77,6 +83,10 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+    stripe.api_version = STRIPE_API_VERSION
 
 
 class TimestampMixin:
@@ -117,6 +127,36 @@ class CompanyModel(PublicBase, TimestampMixin):
     portal_user_id = mapped_column(String(64))
     portal_product_key = mapped_column(String(64))
     portal_last_synced_at = mapped_column(DateTime(timezone=True))
+    stripe_customer_id = mapped_column(String(64))
+    stripe_subscription_id = mapped_column(String(64))
+    stripe_price_id = mapped_column(String(64))
+    subscription_status = mapped_column(String(32))
+
+
+class PendingSignupModel(PublicBase, TimestampMixin):
+    __tablename__ = "pending_signups"
+
+    pending_signup_id = mapped_column(String(32), primary_key=True)
+    email = mapped_column(String(255), nullable=False, index=True)
+    name = mapped_column(String(255), nullable=False)
+    password_hash = mapped_column(String(255), nullable=False)
+    company_name = mapped_column(String(255), nullable=False)
+    company_tax_id = mapped_column(String(64))
+    company_address = mapped_column(Text)
+    company_phone = mapped_column(String(64))
+    company_email = mapped_column(String(255))
+    account_mode = mapped_column(String(16), default="standard", nullable=False)
+    accept_terms = mapped_column(Boolean, default=False, nullable=False)
+    accept_privacy = mapped_column(Boolean, default=False, nullable=False)
+    stripe_checkout_session_id = mapped_column(String(64), unique=True, index=True)
+    stripe_customer_id = mapped_column(String(64))
+    stripe_subscription_id = mapped_column(String(64))
+    stripe_price_id = mapped_column(String(64))
+    status = mapped_column(String(32), default="pending", nullable=False)
+    completed_company_id = mapped_column(String(32))
+    completed_user_id = mapped_column(String(32))
+    expires_at = mapped_column(DateTime(timezone=True))
+    completed_at = mapped_column(DateTime(timezone=True))
 
 
 class LegalDocumentModel(PublicBase, TimestampMixin):
@@ -456,6 +496,10 @@ class RegisterInput(BaseModel):
     accept_privacy: bool = False
 
 
+class CheckoutSignupInput(RegisterInput):
+    price_id: Optional[str] = None
+
+
 class DemoInitializationInput(BaseModel):
     use_sample_data: bool = True
 
@@ -523,6 +567,10 @@ class ForgotPasswordInput(BaseModel):
 class ResetPasswordInput(BaseModel):
     token: str
     new_password: str = Field(min_length=8)
+
+
+class CheckoutCompletionInput(BaseModel):
+    session_id: str
 
 
 class ReturnInput(BaseModel):
@@ -1176,6 +1224,135 @@ def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
 
 
+def get_stripe_price_id(requested_price_id: Optional[str] = None) -> str:
+    price_id = (requested_price_id or STRIPE_PRICE_ID).strip()
+    if not STRIPE_SECRET_KEY or not price_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Stripe no esta configurado todavia. Define STRIPE_SECRET_KEY y STRIPE_PRICE_ID en el backend.",
+        )
+    return price_id
+
+
+def get_stripe_checkout_urls(request: Request) -> Dict[str, str]:
+    base_url = APP_BASE_URL.rstrip("/") if APP_BASE_URL else str(request.base_url).rstrip("/")
+    return {
+        "success_url": f"{base_url}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+        "cancel_url": f"{base_url}/?checkout=cancelled",
+    }
+
+
+def create_company_admin_account(
+    db: Session,
+    request: Request,
+    *,
+    name: str,
+    email: str,
+    password_hash: str,
+    company_name: str,
+    company_tax_id: Optional[str] = None,
+    company_address: Optional[str] = None,
+    company_phone: Optional[str] = None,
+    company_email: Optional[str] = None,
+    account_mode: str = "standard",
+    stripe_customer_id: Optional[str] = None,
+    stripe_subscription_id: Optional[str] = None,
+    stripe_price_id: Optional[str] = None,
+    subscription_status: Optional[str] = None,
+) -> UserModel:
+    seed_legal_documents(db)
+    schema_name = slugify_schema_name(company_name)
+    ensure_schema_exists(schema_name)
+    terms_document = get_latest_legal_document_by_code(db, "terms")
+    privacy_document = get_latest_legal_document_by_code(db, "privacy")
+
+    company = CompanyModel(
+        company_id=prefixed_id("comp"),
+        schema_name=schema_name,
+        name=company_name.strip(),
+        legal_name=company_name.strip(),
+        tax_id=company_tax_id.strip() if company_tax_id else None,
+        address=company_address.strip() if company_address else None,
+        phone=company_phone.strip() if company_phone else None,
+        email=company_email.lower() if company_email else None,
+        billing_email=company_email.lower() if company_email else email.lower(),
+        account_mode=account_mode,
+        demo_record_limit=DEMO_RECORD_LIMIT_DEFAULT,
+        demo_expires_at=datetime.now(timezone.utc) + timedelta(days=DEMO_DURATION_DAYS) if account_mode == DEMO_ACCOUNT_MODE else None,
+        fiscal_series_config={"default": {"series": "F", "next_number": 1}},
+        verifactu_enabled=True,
+        aeat_submission_enabled=False,
+        stripe_customer_id=stripe_customer_id,
+        stripe_subscription_id=stripe_subscription_id,
+        stripe_price_id=stripe_price_id,
+        subscription_status=subscription_status,
+    )
+    user = UserModel(
+        user_id=prefixed_id("user"),
+        email=email.lower(),
+        password_hash=password_hash,
+        name=name.strip(),
+        role="admin",
+        company_id=company.company_id,
+    )
+    try:
+        db.add(company)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        setattr(user, "company_schema", schema_name)
+        record_legal_acceptance(db, user.user_id, company.company_id, terms_document.code, terms_document.version, request)
+        record_legal_acceptance(db, user.user_id, company.company_id, privacy_document.code, privacy_document.version, request)
+        log_security_event(
+            db,
+            action="auth.register",
+            company_id=company.company_id,
+            user_id=user.user_id,
+            entity_type="company",
+            entity_id=company.company_id,
+            metadata_json={"schema_name": schema_name, "subscription_status": subscription_status},
+        )
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Registration failed for company bootstrap")
+        raise HTTPException(status_code=400, detail="No se pudo crear la empresa. Revisa si el email ya existe o si faltan datos obligatorios.") from exc
+
+    tenant_db = TenantSessionLocal(bind=get_tenant_bind(schema_name))
+    try:
+        apply_tenant_migrations(schema_name)
+        warehouse = WarehouseModel(
+            warehouse_id=prefixed_id("wh"),
+            name="Almacen Principal",
+            company_id=company.company_id,
+        )
+        tenant_db.add(warehouse)
+        log_system_event(
+            tenant_db,
+            user,
+            event_type="company.bootstrap",
+            entity_type="warehouse",
+            entity_id=warehouse.warehouse_id,
+            payload={"name": warehouse.name},
+        )
+        tenant_db.commit()
+    except HTTPException:
+        tenant_db.rollback()
+        raise
+    except Exception as exc:
+        tenant_db.rollback()
+        logger.exception("Tenant bootstrap failed")
+        raise HTTPException(status_code=400, detail="La empresa se creo parcialmente, pero fallo la preparacion inicial del tenant.") from exc
+    finally:
+        tenant_db.close()
+
+    setattr(user, "company", company)
+    return user
+
+
 def slugify_schema_name(company_name: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", company_name.lower()).strip("_")
     normalized = normalized or "tenant"
@@ -1207,6 +1384,10 @@ def apply_public_migrations() -> None:
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS portal_user_id VARCHAR(64)",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS portal_product_key VARCHAR(64)",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS portal_last_synced_at TIMESTAMPTZ",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(64)",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(64)",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS stripe_price_id VARCHAR(64)",
+        "ALTER TABLE companies ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(32)",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS fiscal_series_config JSONB NOT NULL DEFAULT '{}'::jsonb",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS verifactu_enabled BOOLEAN NOT NULL DEFAULT TRUE",
         "ALTER TABLE companies ADD COLUMN IF NOT EXISTS aeat_submission_enabled BOOLEAN NOT NULL DEFAULT FALSE",
@@ -2990,93 +3171,20 @@ def register(data: RegisterInput, request: Request, response: Response, db: Sess
     account_mode = (data.account_mode or "standard").strip().lower()
     if account_mode not in {"standard", DEMO_ACCOUNT_MODE}:
         raise HTTPException(status_code=400, detail="Modo de cuenta no valido")
-
-    seed_legal_documents(db)
-    schema_name = slugify_schema_name(data.company_name)
-    ensure_schema_exists(schema_name)
-
-    terms_document = get_latest_legal_document_by_code(db, "terms")
-    privacy_document = get_latest_legal_document_by_code(db, "privacy")
-    company = CompanyModel(
-        company_id=prefixed_id("comp"),
-        schema_name=schema_name,
-        name=data.company_name.strip(),
-        legal_name=data.company_name.strip(),
-        tax_id=data.company_tax_id.strip() if data.company_tax_id else None,
-        address=data.company_address.strip() if data.company_address else None,
-        phone=data.company_phone.strip() if data.company_phone else None,
-        email=data.company_email.lower() if data.company_email else None,
-        billing_email=data.company_email.lower() if data.company_email else data.email.lower(),
-        account_mode=account_mode,
-        demo_record_limit=DEMO_RECORD_LIMIT_DEFAULT,
-        demo_expires_at=datetime.now(timezone.utc) + timedelta(days=DEMO_DURATION_DAYS) if account_mode == DEMO_ACCOUNT_MODE else None,
-        fiscal_series_config={"default": {"series": "F", "next_number": 1}},
-        verifactu_enabled=True,
-        aeat_submission_enabled=False,
-    )
-    user = UserModel(
-        user_id=prefixed_id("user"),
-        email=data.email.lower(),
+    user = create_company_admin_account(
+        db,
+        request,
+        name=data.name,
+        email=data.email,
         password_hash=hash_password(data.password),
-        name=data.name.strip(),
-        role="admin",
-        company_id=company.company_id,
+        company_name=data.company_name,
+        company_tax_id=data.company_tax_id,
+        company_address=data.company_address,
+        company_phone=data.company_phone,
+        company_email=data.company_email,
+        account_mode=account_mode,
+        subscription_status="trialing" if account_mode == DEMO_ACCOUNT_MODE else "active",
     )
-    try:
-        db.add(company)
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        setattr(user, "company_schema", schema_name)
-        record_legal_acceptance(db, user.user_id, company.company_id, terms_document.code, terms_document.version, request)
-        record_legal_acceptance(db, user.user_id, company.company_id, privacy_document.code, privacy_document.version, request)
-        log_security_event(
-            db,
-            action="auth.register",
-            company_id=company.company_id,
-            user_id=user.user_id,
-            entity_type="company",
-            entity_id=company.company_id,
-            metadata_json={"schema_name": schema_name},
-        )
-        db.commit()
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as exc:
-        db.rollback()
-        logger.exception("Registration failed for company bootstrap")
-        raise HTTPException(status_code=400, detail="No se pudo crear la empresa. Revisa si el email ya existe o si faltan datos obligatorios.") from exc
-
-    tenant_db = TenantSessionLocal(bind=get_tenant_bind(schema_name))
-    try:
-        apply_tenant_migrations(schema_name)
-        warehouse = WarehouseModel(
-            warehouse_id=prefixed_id("wh"),
-            name="Almacen Principal",
-            company_id=company.company_id,
-        )
-        tenant_db.add(warehouse)
-        log_system_event(
-            tenant_db,
-            user,
-            event_type="company.bootstrap",
-            entity_type="warehouse",
-            entity_id=warehouse.warehouse_id,
-            payload={"name": warehouse.name},
-        )
-        tenant_db.commit()
-    except HTTPException:
-        tenant_db.rollback()
-        raise
-    except Exception as exc:
-        tenant_db.rollback()
-        logger.exception("Tenant bootstrap failed")
-        raise HTTPException(status_code=400, detail="La empresa se creo parcialmente, pero fallo la preparacion inicial del tenant.") from exc
-    finally:
-        tenant_db.close()
-
-    setattr(user, "company", company)
     set_auth_cookie(response, create_access_token(user))
     return serialize_user(user)
 
@@ -3260,6 +3368,172 @@ def reset_password(data: ResetPasswordInput, db: Session = Depends(get_public_db
     user.password_hash = hash_password(data.new_password)
     db.commit()
     return {"message": "Password updated"}
+
+
+@app.post("/api/billing/checkout-session")
+def create_checkout_session(
+    data: CheckoutSignupInput,
+    request: Request,
+    db: Session = Depends(get_public_db),
+) -> Dict[str, Any]:
+    if db.query(UserModel).filter(UserModel.email == data.email.lower()).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+    if not data.accept_terms or not data.accept_privacy:
+        raise HTTPException(status_code=400, detail="Debes aceptar terminos y politica de privacidad")
+
+    account_mode = (data.account_mode or "standard").strip().lower()
+    if account_mode != "standard":
+        raise HTTPException(status_code=400, detail="Stripe checkout solo esta disponible para el plan estandar de pago")
+
+    price_id = get_stripe_price_id(data.price_id)
+    pending_signup = PendingSignupModel(
+        pending_signup_id=prefixed_id("psu"),
+        email=data.email.lower(),
+        name=data.name.strip(),
+        password_hash=hash_password(data.password),
+        company_name=data.company_name.strip(),
+        company_tax_id=data.company_tax_id.strip() if data.company_tax_id else None,
+        company_address=data.company_address.strip() if data.company_address else None,
+        company_phone=data.company_phone.strip() if data.company_phone else None,
+        company_email=data.company_email.lower() if data.company_email else None,
+        account_mode=account_mode,
+        accept_terms=bool(data.accept_terms),
+        accept_privacy=bool(data.accept_privacy),
+        stripe_price_id=price_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+    )
+    db.add(pending_signup)
+    db.flush()
+
+    urls = get_stripe_checkout_urls(request)
+    try:
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": 1}],
+            success_url=urls["success_url"],
+            cancel_url=urls["cancel_url"],
+            customer_email=pending_signup.email,
+            client_reference_id=pending_signup.pending_signup_id,
+            metadata={
+                "pending_signup_id": pending_signup.pending_signup_id,
+                "productKey": STRIPE_DEFAULT_PRODUCT_KEY,
+                "companyName": pending_signup.company_name,
+            },
+            subscription_data={
+                "metadata": {
+                    "pending_signup_id": pending_signup.pending_signup_id,
+                    "productKey": STRIPE_DEFAULT_PRODUCT_KEY,
+                }
+            },
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Stripe checkout session creation failed")
+        raise HTTPException(status_code=502, detail="No se pudo iniciar Stripe Checkout en modo test") from exc
+
+    pending_signup.stripe_checkout_session_id = session.id
+    pending_signup.status = "checkout_created"
+    db.commit()
+    return {"url": session.url, "session_id": session.id}
+
+
+@app.post("/api/billing/checkout-session/complete")
+def complete_checkout_session(
+    data: CheckoutCompletionInput,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_public_db),
+) -> Dict[str, Any]:
+    get_stripe_price_id()
+    try:
+        session = stripe.checkout.Session.retrieve(
+            data.session_id,
+            expand=["subscription", "customer"],
+        )
+    except Exception as exc:
+        logger.exception("Could not retrieve Stripe checkout session")
+        raise HTTPException(status_code=400, detail="No se pudo verificar la sesion de Stripe") from exc
+
+    pending_signup = (
+        db.query(PendingSignupModel)
+        .filter(PendingSignupModel.stripe_checkout_session_id == data.session_id)
+        .first()
+    )
+    if not pending_signup:
+        raise HTTPException(status_code=404, detail="No se encontro el registro pendiente para esta sesion")
+    if pending_signup.completed_user_id:
+        user = db.query(UserModel).filter(UserModel.user_id == pending_signup.completed_user_id).first()
+        if not user:
+            raise HTTPException(status_code=409, detail="La compra se marco como completada, pero el usuario final no existe")
+        company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+        setattr(user, "company", company)
+        setattr(user, "company_schema", company.schema_name if company else None)
+        set_auth_cookie(response, create_access_token(user))
+        return serialize_user(user)
+    if pending_signup.expires_at and pending_signup.expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="La sesion de alta ha expirado. Inicia de nuevo el checkout.")
+
+    subscription = session.subscription if hasattr(session, "subscription") else None
+    subscription_status = getattr(subscription, "status", None) if subscription else None
+    payment_status = getattr(session, "payment_status", None)
+    if session.status != "complete" or payment_status not in {"paid", "no_payment_required"}:
+        raise HTTPException(status_code=400, detail="Stripe aun no confirma el pago de esta sesion")
+    if subscription_status not in {"active", "trialing"}:
+        raise HTTPException(status_code=400, detail="La suscripcion no esta activa todavia")
+    if db.query(UserModel).filter(UserModel.email == pending_signup.email.lower()).first():
+        raise HTTPException(status_code=400, detail="Ese email ya esta registrado")
+
+    user = create_company_admin_account(
+        db,
+        request,
+        name=pending_signup.name,
+        email=pending_signup.email,
+        password_hash=pending_signup.password_hash,
+        company_name=pending_signup.company_name,
+        company_tax_id=pending_signup.company_tax_id,
+        company_address=pending_signup.company_address,
+        company_phone=pending_signup.company_phone,
+        company_email=pending_signup.company_email,
+        account_mode="standard",
+        stripe_customer_id=getattr(session.customer, "id", None) if getattr(session, "customer", None) else None,
+        stripe_subscription_id=getattr(subscription, "id", None) if subscription else None,
+        stripe_price_id=pending_signup.stripe_price_id,
+        subscription_status=subscription_status,
+    )
+    pending_signup.stripe_customer_id = getattr(session.customer, "id", None) if getattr(session, "customer", None) else None
+    pending_signup.stripe_subscription_id = getattr(subscription, "id", None) if subscription else None
+    pending_signup.status = "completed"
+    pending_signup.completed_company_id = user.company_id
+    pending_signup.completed_user_id = user.user_id
+    pending_signup.completed_at = datetime.now(timezone.utc)
+    db.commit()
+
+    set_auth_cookie(response, create_access_token(user))
+    return serialize_user(user)
+
+
+@app.post("/api/billing/customer-portal")
+def create_customer_portal_session(
+    user: UserModel = Depends(get_current_user),
+    db: Session = Depends(get_public_db),
+) -> Dict[str, Any]:
+    company = first_or_404(
+        db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id),
+        "Company not found",
+    )
+    if not company.stripe_customer_id:
+        raise HTTPException(status_code=400, detail="Esta empresa no tiene cliente Stripe asociado todavia")
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Stripe no esta configurado en el backend")
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=company.stripe_customer_id,
+            return_url=f"{APP_BASE_URL.rstrip('/')}/settings",
+        )
+    except Exception as exc:
+        logger.exception("Could not create Stripe customer portal session")
+        raise HTTPException(status_code=502, detail="No se pudo abrir el portal de cliente de Stripe") from exc
+    return {"url": session.url}
 
 
 @app.get("/api/companies")
