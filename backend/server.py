@@ -20,7 +20,7 @@ import stripe
 from compliance_services import build_verifactu_export, get_aeat_adapter
 from dotenv import load_dotenv
 from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from openai import AsyncOpenAI
@@ -3345,9 +3345,9 @@ def consume_sso(token: str, db: Session = Depends(get_public_db)) -> Response:
     setattr(user, "company_schema", company.schema_name)
     setattr(user, "company", company)
 
-    response = Response(status_code=307)
+    response = RedirectResponse(url=f"{APP_BASE_URL.rstrip('/')}/dashboard", status_code=303)
     set_auth_cookie(response, create_access_token(user))
-    response.headers["Location"] = f"{APP_BASE_URL.rstrip('/')}/dashboard"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
