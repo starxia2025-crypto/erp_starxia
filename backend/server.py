@@ -1639,24 +1639,45 @@ def provision_user_from_sso_payload(payload: Dict[str, Any], db: Session) -> Use
             access_granted_at=datetime.now(timezone.utc),
             access_expires_at=trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None,
             portal_last_synced_at=datetime.now(timezone.utc),
+            fiscal_series_config={"default": {"series": "F", "next_number": 1}},
+            verifactu_enabled=True,
+            aeat_submission_enabled=False,
         )
         db.add(company)
         db.flush()
-        initialize_tenant_schema(company.schema_name)
-        seed_demo_environment(db, company)
 
         user = UserModel(
             user_id=prefixed_id("user"),
             company_id=company.company_id,
-            role="owner",
+            role="admin",
             name=full_name,
             email=email,
             password_hash=hash_password(uuid.uuid4().hex),
             picture=avatar_url,
         )
         db.add(user)
-        db.flush()
-        seed_user_context_defaults(db, user)
+        db.commit()
+        db.refresh(user)
+
+        tenant_db = TenantSessionLocal(bind=get_tenant_bind(schema_name))
+        try:
+            apply_tenant_migrations(schema_name)
+            warehouse = WarehouseModel(
+                warehouse_id=prefixed_id("wh"),
+                name="Almacen Principal",
+                company_id=company.company_id,
+            )
+            tenant_db.add(warehouse)
+            tenant_db.commit()
+        except HTTPException:
+            tenant_db.rollback()
+            raise
+        except Exception as exc:
+            tenant_db.rollback()
+            logger.exception("Tenant bootstrap failed during SSO exchange")
+            raise HTTPException(status_code=400, detail="La empresa se creo parcialmente, pero fallo la preparacion inicial del tenant.") from exc
+        finally:
+            tenant_db.close()
 
     if not company:
         company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
@@ -1678,7 +1699,7 @@ def provision_user_from_sso_payload(payload: Dict[str, Any], db: Session) -> Use
         company.demo_expires_at = trial_ends_at
         company.demo_initialized_at = company.demo_initialized_at or datetime.now(timezone.utc)
     else:
-        company.account_mode = STANDARD_ACCOUNT_MODE
+        company.account_mode = "standard"
         company.demo_expires_at = None
     user.name = full_name
     user.picture = avatar_url
