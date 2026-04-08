@@ -1601,6 +1601,96 @@ def decode_sso_token(token: str) -> Dict[str, Any]:
     return payload
 
 
+def provision_user_from_sso_payload(payload: Dict[str, Any], db: Session) -> UserModel:
+    email = str(payload.get("email", "")).strip().lower()
+    full_name = str(payload.get("fullName", "")).strip() or "Usuario Starxia"
+    business_name = str(payload.get("businessName", "")).strip() or f"{full_name.split(' ')[0]} ERP"
+    avatar_url = payload.get("avatarUrl")
+    access_mode = "demo" if payload.get("accessMode") == "demo" else "standard"
+    trial_ends_at = parse_iso_datetime(payload.get("trialEndsAt"))
+    portal_user_id = str(payload.get("portalUserId", "")).strip()
+    portal_product_key = str(payload.get("productKey", "")).strip()
+
+    if not email:
+        raise HTTPException(status_code=400, detail="SSO payload is missing email")
+
+    user = db.query(UserModel).filter(UserModel.email == email).first()
+    company: Optional[CompanyModel] = None
+
+    if user:
+        company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    else:
+        schema_name = slugify_schema_name(business_name)
+        ensure_schema_exists(schema_name)
+        company = CompanyModel(
+            company_id=prefixed_id("comp"),
+            schema_name=schema_name,
+            name=business_name,
+            legal_name=business_name,
+            billing_email=email,
+            account_mode=access_mode,
+            demo_record_limit=DEMO_RECORD_LIMIT_DEFAULT,
+            demo_expires_at=trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None,
+            demo_initialized_at=datetime.now(timezone.utc) if access_mode == DEMO_ACCOUNT_MODE else None,
+            portal_user_id=portal_user_id or None,
+            portal_product_key=portal_product_key or None,
+            portal_access_mode=access_mode,
+            subscription_status="trialing" if access_mode == DEMO_ACCOUNT_MODE else "active",
+            access_granted_at=datetime.now(timezone.utc),
+            access_expires_at=trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None,
+            portal_last_synced_at=datetime.now(timezone.utc),
+        )
+        db.add(company)
+        db.flush()
+        initialize_tenant_schema(company.schema_name)
+        seed_demo_environment(db, company)
+
+        user = UserModel(
+            user_id=prefixed_id("user"),
+            company_id=company.company_id,
+            role="owner",
+            name=full_name,
+            email=email,
+            password_hash=hash_password(uuid.uuid4().hex),
+            picture=avatar_url,
+        )
+        db.add(user)
+        db.flush()
+        seed_user_context_defaults(db, user)
+
+    if not company:
+        company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found for SSO user")
+
+    company.name = business_name or company.name
+    company.legal_name = business_name or company.legal_name or company.name
+    company.billing_email = email
+    company.portal_user_id = portal_user_id or company.portal_user_id
+    company.portal_product_key = portal_product_key or company.portal_product_key
+    company.portal_access_mode = access_mode
+    company.subscription_status = "trialing" if access_mode == DEMO_ACCOUNT_MODE else "active"
+    company.access_granted_at = company.access_granted_at or datetime.now(timezone.utc)
+    company.access_expires_at = trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None
+    company.portal_last_synced_at = datetime.now(timezone.utc)
+    if access_mode == DEMO_ACCOUNT_MODE:
+        company.account_mode = DEMO_ACCOUNT_MODE
+        company.demo_expires_at = trial_ends_at
+        company.demo_initialized_at = company.demo_initialized_at or datetime.now(timezone.utc)
+    else:
+        company.account_mode = STANDARD_ACCOUNT_MODE
+        company.demo_expires_at = None
+    user.name = full_name
+    user.picture = avatar_url
+    setattr(user, "company_schema", company.schema_name)
+    setattr(user, "company", company)
+    db.commit()
+    db.refresh(user)
+    setattr(user, "company_schema", company.schema_name)
+    setattr(user, "company", company)
+    return user
+
+
 def create_password_reset_token(user: UserModel) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
     payload = {
@@ -3264,91 +3354,21 @@ def logout(response: Response, user: UserModel = Depends(get_current_user), db: 
 
 @app.get("/api/sso/consume")
 def consume_sso(token: str, db: Session = Depends(get_public_db)) -> Response:
-    payload = decode_sso_token(token)
-    email = str(payload.get("email", "")).strip().lower()
-    full_name = str(payload.get("fullName", "")).strip() or "Usuario Starxia"
-    business_name = str(payload.get("businessName", "")).strip() or f"{full_name.split(' ')[0]} ERP"
-    avatar_url = payload.get("avatarUrl")
-    access_mode = "demo" if payload.get("accessMode") == "demo" else "standard"
-    trial_ends_at = parse_iso_datetime(payload.get("trialEndsAt"))
-    portal_user_id = str(payload.get("portalUserId", "")).strip()
-    portal_product_key = str(payload.get("productKey", "")).strip()
-
-    if not email:
-        raise HTTPException(status_code=400, detail="SSO payload is missing email")
-
-    user = db.query(UserModel).filter(UserModel.email == email).first()
-    company: Optional[CompanyModel] = None
-
-    if user:
-        company = db.query(CompanyModel).filter(CompanyModel.company_id == user.company_id).first()
-    else:
-        schema_name = slugify_schema_name(business_name)
-        ensure_schema_exists(schema_name)
-        company = CompanyModel(
-            company_id=prefixed_id("comp"),
-            schema_name=schema_name,
-            name=business_name,
-            legal_name=business_name,
-            billing_email=email,
-            account_mode=access_mode,
-            demo_record_limit=DEMO_RECORD_LIMIT_DEFAULT,
-            demo_expires_at=trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None,
-            portal_user_id=portal_user_id or None,
-            portal_product_key=portal_product_key or None,
-            portal_last_synced_at=datetime.now(timezone.utc),
-            fiscal_series_config={"default": {"series": "F", "next_number": 1}},
-            verifactu_enabled=True,
-            aeat_submission_enabled=False,
-        )
-        user = UserModel(
-            user_id=prefixed_id("user"),
-            email=email,
-            password_hash=hash_password(uuid.uuid4().hex),
-            name=full_name,
-            picture=avatar_url,
-            role="admin",
-            company_id=company.company_id,
-        )
-        db.add(company)
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
-        tenant_db = TenantSessionLocal(bind=get_tenant_bind(schema_name))
-        try:
-            apply_tenant_migrations(schema_name)
-            warehouse = WarehouseModel(
-                warehouse_id=prefixed_id("wh"),
-                name="Almacen Principal",
-                company_id=company.company_id,
-            )
-            tenant_db.add(warehouse)
-            tenant_db.commit()
-        finally:
-            tenant_db.close()
-
-    if not company:
-        raise HTTPException(status_code=404, detail="Company not found for SSO user")
-
-    company.account_mode = access_mode
-    company.demo_expires_at = trial_ends_at if access_mode == DEMO_ACCOUNT_MODE else None
-    company.portal_user_id = portal_user_id or company.portal_user_id
-    company.portal_product_key = portal_product_key or company.portal_product_key
-    company.portal_last_synced_at = datetime.now(timezone.utc)
-    if avatar_url and not user.picture:
-        user.picture = avatar_url
-    if full_name and user.name != full_name:
-        user.name = full_name
-    db.commit()
-
-    setattr(user, "company_schema", company.schema_name)
-    setattr(user, "company", company)
-
+    user = provision_user_from_sso_payload(decode_sso_token(token), db)
     response = RedirectResponse(url=f"{APP_BASE_URL.rstrip('/')}/dashboard", status_code=303)
     set_auth_cookie(response, create_access_token(user))
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.post("/api/sso/exchange")
+def exchange_sso_token(data: Dict[str, Any], response: Response, db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+    token = str(data.get("token", "")).strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="SSO token is required")
+    user = provision_user_from_sso_payload(decode_sso_token(token), db)
+    set_auth_cookie(response, create_access_token(user))
+    return serialize_user(user)
 
 
 @app.post("/api/auth/forgot-password")

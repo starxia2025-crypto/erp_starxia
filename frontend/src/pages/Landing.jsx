@@ -72,6 +72,7 @@ const Landing = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const resetToken = searchParams.get("reset_token") || "";
+  const ssoToken = searchParams.get("sso_token") || "";
   const demoModeRequested = (searchParams.get("mode") || "").toLowerCase() === "demo";
 
   const [loginForm, setLoginForm] = useState(initialLogin);
@@ -82,6 +83,7 @@ const Landing = () => {
   const [requestingReset, setRequestingReset] = useState(false);
   const [resettingPassword, setResettingPassword] = useState(false);
   const [completingCheckout, setCompletingCheckout] = useState(false);
+  const [completingSso, setCompletingSso] = useState(false);
   const [consents, setConsents] = useState(initialConsents);
   const [legalDocuments, setLegalDocuments] = useState([]);
   const isDark = theme === "dark";
@@ -109,6 +111,42 @@ const Landing = () => {
       navigate("/dashboard");
     }
   }, [user, navigate, hasResetToken]);
+
+  useEffect(() => {
+    if (!ssoToken || user) {
+      return;
+    }
+
+    let cancelled = false;
+    const completeSso = async () => {
+      setCompletingSso(true);
+      try {
+        const response = await axios.post(
+          `${API}/sso/exchange`,
+          { token: ssoToken },
+          { withCredentials: true }
+        );
+        if (cancelled) return;
+        setUser(response.data);
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.delete("sso_token");
+        setSearchParams(nextParams, { replace: true });
+        navigate("/dashboard", { replace: true });
+      } catch (error) {
+        if (cancelled) return;
+        toast.error(error.response?.data?.detail || "No se pudo iniciar la sesion del ERP");
+      } finally {
+        if (!cancelled) {
+          setCompletingSso(false);
+        }
+      }
+    };
+
+    completeSso();
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, searchParams, setSearchParams, setUser, ssoToken, user]);
 
   useEffect(() => {
     const loadLegalDocuments = async () => {
@@ -415,8 +453,8 @@ const Landing = () => {
                           required
                         />
                       </div>
-                      <Button className="w-full" type="submit" disabled={submitting}>
-                        {submitting ? "Entrando..." : "Entrar al ERP"}
+                      <Button className="w-full" type="submit" disabled={submitting || completingSso}>
+                        {completingSso ? "Accediendo..." : submitting ? "Entrando..." : "Entrar al ERP"}
                       </Button>
                     </form>
 
@@ -526,11 +564,13 @@ const Landing = () => {
                         </div>
                       )}
 
-                      <Button className="w-full" type="submit" disabled={submitting || completingCheckout}>
+                      <Button className="w-full" type="submit" disabled={submitting || completingCheckout || completingSso}>
                         {submitting
                           ? "Preparando..."
                           : completingCheckout
                             ? "Confirmando pago..."
+                            : completingSso
+                              ? "Accediendo..."
                             : demoModeRequested
                               ? "Crear demo y acceder"
                               : "Continuar al pago seguro"}
