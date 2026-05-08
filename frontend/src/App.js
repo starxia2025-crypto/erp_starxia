@@ -8,6 +8,7 @@ import { canAccessAny, hasPermission } from "@/lib/permissions";
 
 // Pages
 import Landing from "@/pages/Landing";
+import DemoAccess from "@/pages/DemoAccess";
 import Dashboard from "@/pages/Dashboard";
 import Clients from "@/pages/Clients";
 import ClientTypes from "@/pages/ClientTypes";
@@ -132,6 +133,7 @@ const AppRouter = () => {
   return (
     <Routes>
       <Route path="/" element={<Landing />} />
+      <Route path="/demo" element={<DemoAccess />} />
       <Route path="/legal/:code" element={<LegalDocumentPage />} />
       <Route path="/dashboard" element={<ProtectedRoute permission="dashboard.read"><Dashboard /></ProtectedRoute>} />
       <Route path="/clients" element={<ProtectedRoute permission="clients.read"><Clients /></ProtectedRoute>} />

@@ -71,6 +71,15 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "").strip()
 STRIPE_DEFAULT_PRODUCT_KEY = os.environ.get("STRIPE_DEFAULT_PRODUCT_KEY", "erp-standard").strip() or "erp-standard"
 STRIPE_API_VERSION = "2026-02-25.clover"
+PUBLIC_DEMO_ENABLED = os.environ.get("PUBLIC_DEMO_ENABLED", "true").lower() == "true"
+PUBLIC_DEMO_COMPANY_NAME = os.environ.get("PUBLIC_DEMO_COMPANY_NAME", "Starxia ERP Demo").strip() or "Starxia ERP Demo"
+PUBLIC_DEMO_ADMIN_NAME = os.environ.get("PUBLIC_DEMO_ADMIN_NAME", "Admin Demo Starxia").strip() or "Admin Demo Starxia"
+PUBLIC_DEMO_ADMIN_EMAIL = os.environ.get("PUBLIC_DEMO_ADMIN_EMAIL", "admin.demo@starxia.local").strip().lower()
+PUBLIC_DEMO_USER_NAME = os.environ.get("PUBLIC_DEMO_USER_NAME", "Invitado Demo").strip() or "Invitado Demo"
+PUBLIC_DEMO_USER_EMAIL = os.environ.get("PUBLIC_DEMO_USER_EMAIL", "demo@starxia.local").strip().lower()
+PUBLIC_DEMO_PASSWORD = os.environ.get("PUBLIC_DEMO_PASSWORD", "starxia-demo-access")
+PUBLIC_DEMO_RECORD_LIMIT = int(os.environ.get("PUBLIC_DEMO_RECORD_LIMIT", "40"))
+PUBLIC_DEMO_DURATION_DAYS = int(os.environ.get("PUBLIC_DEMO_DURATION_DAYS", "3650"))
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True, connect_args=connect_args)
@@ -659,6 +668,23 @@ ROLE_PERMISSIONS = {
         "ai.read",
         "users.read",
     },
+    "demo": {
+        "dashboard.read",
+        "clients.read",
+        "clients.write",
+        "suppliers.read",
+        "suppliers.write",
+        "products.read",
+        "products.write",
+        "inventory.read",
+        "inventory.write",
+        "sales.read",
+        "sales.write",
+        "purchases.read",
+        "purchases.write",
+        "reports.read",
+        "ai.read",
+    },
 }
 VALID_ROLES = set(ROLE_PERMISSIONS.keys())
 ENTITY_PERMISSION_MAP = {
@@ -1114,9 +1140,14 @@ def get_required_legal_reacceptances(db: Session, user: UserModel) -> List[Dict[
     return pending
 
 
+def is_public_demo_user(user: Optional[UserModel]) -> bool:
+    return bool(user and user.email and user.email.lower() == PUBLIC_DEMO_USER_EMAIL)
+
+
 def serialize_user(user: UserModel) -> Dict[str, Any]:
     data = model_to_dict(user, exclude={"password_hash"})
     data["permissions"] = sorted(permissions_for_role(user.role))
+    data["is_public_demo_user"] = is_public_demo_user(user)
     company = getattr(user, "company", None)
     if company is not None:
         data["company_name"] = company.legal_name or company.name
@@ -1805,6 +1836,109 @@ def record_legal_acceptance(
     )
     db.add(acceptance)
     return acceptance
+
+
+def ensure_user_has_current_legal_acceptances(db: Session, user: UserModel, request: Request) -> None:
+    missing_documents = get_required_legal_reacceptances(db, user)
+    for document in missing_documents:
+        record_legal_acceptance(
+            db,
+            user.user_id,
+            user.company_id,
+            document["code"],
+            document["version"],
+            request,
+        )
+
+
+def configure_public_demo_company(company: CompanyModel) -> None:
+    company.account_mode = DEMO_ACCOUNT_MODE
+    company.demo_record_limit = max(company.demo_record_limit or 0, PUBLIC_DEMO_RECORD_LIMIT)
+    company.demo_expires_at = (
+        datetime.now(timezone.utc) + timedelta(days=PUBLIC_DEMO_DURATION_DAYS)
+        if PUBLIC_DEMO_DURATION_DAYS > 0
+        else None
+    )
+    if not company.subscription_status:
+        company.subscription_status = "active"
+
+
+def ensure_public_demo_access_user(db: Session, request: Request) -> UserModel:
+    if not PUBLIC_DEMO_ENABLED:
+        raise HTTPException(status_code=404, detail="La demo publica no esta disponible ahora mismo.")
+
+    seed_legal_documents(db)
+    demo_admin = db.query(UserModel).filter(UserModel.email == PUBLIC_DEMO_ADMIN_EMAIL).first()
+    company = None
+
+    if demo_admin:
+        company = db.query(CompanyModel).filter(CompanyModel.company_id == demo_admin.company_id).first()
+
+    if not company:
+        demo_admin = create_company_admin_account(
+            db,
+            request,
+            name=PUBLIC_DEMO_ADMIN_NAME,
+            email=PUBLIC_DEMO_ADMIN_EMAIL,
+            password_hash=hash_password(PUBLIC_DEMO_PASSWORD),
+            company_name=PUBLIC_DEMO_COMPANY_NAME,
+            account_mode=DEMO_ACCOUNT_MODE,
+            subscription_status="active",
+        )
+        company = db.query(CompanyModel).filter(CompanyModel.company_id == demo_admin.company_id).first()
+
+    if not company:
+        raise HTTPException(status_code=500, detail="No se pudo preparar la empresa demo.")
+
+    configure_public_demo_company(company)
+    db.add(company)
+    db.commit()
+    db.refresh(company)
+
+    demo_user = db.query(UserModel).filter(UserModel.email == PUBLIC_DEMO_USER_EMAIL).first()
+    if demo_user and demo_user.company_id != company.company_id:
+        demo_user.company_id = company.company_id
+        demo_user.role = "demo"
+        db.add(demo_user)
+        db.commit()
+        db.refresh(demo_user)
+
+    if not demo_user:
+        demo_user = UserModel(
+            user_id=prefixed_id("user"),
+            email=PUBLIC_DEMO_USER_EMAIL,
+            password_hash=hash_password(PUBLIC_DEMO_PASSWORD),
+            name=PUBLIC_DEMO_USER_NAME,
+            role="demo",
+            company_id=company.company_id,
+        )
+        db.add(demo_user)
+        db.commit()
+        db.refresh(demo_user)
+
+    demo_user.role = "demo"
+    setattr(demo_user, "company", company)
+    setattr(demo_user, "company_schema", company.schema_name)
+    ensure_user_has_current_legal_acceptances(db, demo_user, request)
+    db.add(demo_user)
+    db.commit()
+    db.refresh(demo_user)
+
+    if not company.demo_initialized_at:
+        initialize_demo_company_data(db, demo_user, use_sample_data=True)
+        company = db.query(CompanyModel).filter(CompanyModel.company_id == demo_user.company_id).first()
+
+    if not company:
+        raise HTTPException(status_code=500, detail="No se pudo recuperar la empresa demo.")
+
+    configure_public_demo_company(company)
+    db.add(company)
+    db.commit()
+    db.refresh(company)
+
+    setattr(demo_user, "company", company)
+    setattr(demo_user, "company_schema", company.schema_name)
+    return demo_user
 
 
 def get_token_from_request(request: Request, session_token: Optional[str]) -> str:
@@ -3336,6 +3470,23 @@ def get_me(request: Request, user: UserModel = Depends(get_current_user), db: Se
     data = serialize_user_for_request(user, request)
     data["pending_legal_documents"] = get_required_legal_reacceptances(db, user)
     return data
+
+
+@app.post("/api/auth/demo-access")
+def demo_access(request: Request, response: Response, db: Session = Depends(get_public_db)) -> Dict[str, Any]:
+    user = ensure_public_demo_access_user(db, request)
+    log_security_event(
+        db,
+        action="auth.demo_access",
+        company_id=user.company_id,
+        user_id=user.user_id,
+        entity_type="user",
+        entity_id=user.user_id,
+        metadata_json={"email": user.email},
+    )
+    db.commit()
+    set_auth_cookie(response, create_access_token(user))
+    return serialize_user_for_request(user, request)
 
 
 @app.post("/api/demo/initialize")
